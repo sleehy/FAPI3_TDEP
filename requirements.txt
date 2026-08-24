@@ -1,6 +1,4 @@
 ase
 matplotlib
-phonopy
 PyYAML
 sevenn
-symfc

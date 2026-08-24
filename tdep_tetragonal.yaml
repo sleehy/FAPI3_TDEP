@@ -11,24 +11,22 @@ calculation:
   device: auto                 # e.g. cuda, cuda:0, or cpu
 
 tdep:
+  # Native TDEP executables. Change this path on a different machine.
+  bin_dir: /home/eoung/tdep/bin
   temperature_K: 300.0         # finite-temperature target; change as needed
   supercell_matrix: [3, 3, 2]  # 24 atoms x 3 x 3 x 2 = 432 atoms
   iterations: 5
-  finite_displacement_A: 0.01  # used only to construct iteration-0 FC2
-  force_constant_fitter: symfc # symmetry-constrained least-squares FC2 fit
+  # Used only in iteration 1 to construct TDEP's initial fake FC2. Subsequent
+  # samplings use the FC2 fitted by extract_forceconstants in the last iteration.
+  initial_maximum_frequency_THz: 100.0
+  secondorder_cutoff_A: 8.0
 
 sampling:
-  statistics: quantum          # canonical Bose-Einstein/zero-point sampling
+  quantum: true                # canonical Bose-Einstein/zero-point sampling
   configurations_per_iteration: 200
-  random_seed: 20260824
-  # Modes at or below this value (including imaginary modes) are excluded
-  # from the harmonic distribution because their canonical variance is undefined.
-  cutoff_frequency_THz: 0.10
-  max_displacement_A: 0.35
 
 convergence:
   min_iterations: 2
-  max_fc_relative_change: 0.02
   max_band_rms_change_THz: 0.05
 
 dispersion:

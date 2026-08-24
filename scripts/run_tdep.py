@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Config-driven self-consistent harmonic (TDEP-style) phonon workflow.
+"""Run stochastic TDEP with native TDEP programs and SevenNet force labels.
 
-The workflow uses Phonopy's quantum canonical displacement generator, SevenNet
-for single-point energy/force evaluations, and symfc for symmetry-constrained
-second-order force matching.  Iteration 0 is a finite-displacement harmonic
-calculation; iterations 1..N are the finite-temperature TDEP updates.
+TDEP owns the lattice-dynamics steps: ``generate_structure`` builds the
+supercell, ``canonical_configuration --quantum`` samples it,
+``extract_forceconstants`` fits FC2, and ``phonon_dispersion_relations``
+calculates each iteration's bands. Python only handles config, SevenNet labels,
+TDEP file conversion, and the convergence-overlay plot.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import csv
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,9 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
-from ase import Atoms
-from phonopy import Phonopy
-from phonopy.interface.vasp import read_vasp
+from ase.io import read, write
 from sevenn.calculator import SevenNetCalculator
 
 
@@ -39,234 +39,240 @@ def load_config(path: Path) -> dict:
     return config
 
 
-def path_from_config(config: dict, value: str) -> Path:
+def config_path(config: dict, value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else config["_config_dir"] / path
 
 
-def phonopy_to_ase(cell) -> Atoms:
-    return Atoms(
-        symbols=cell.symbols,
-        scaled_positions=cell.scaled_positions,
-        cell=cell.cell,
-        pbc=True,
-    )
+def run_command(command: list[str], cwd: Path) -> None:
+    print("+", " ".join(command), flush=True)
+    subprocess.run(command, cwd=cwd, check=True)
 
 
-def make_phonopy(config: dict) -> Phonopy:
-    input_cfg = config["input"]
-    unitcell = read_vasp(path_from_config(config, input_cfg["structure"]))
-    return Phonopy(
-        unitcell,
-        supercell_matrix=config["tdep"]["supercell_matrix"],
-        primitive_matrix=input_cfg["primitive_matrix"],
-        symprec=float(input_cfg["symprec"]),
-        calculator="vasp",
-        log_level=1,
-    )
+def tdep_executable(config: dict, name: str) -> str:
+    executable = config_path(config, config["tdep"]["bin_dir"]) / name
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise FileNotFoundError(f"TDEP executable not found or not executable: {executable}")
+    return str(executable)
 
 
-def get_calculator(config: dict) -> SevenNetCalculator:
-    calc_cfg = config["calculation"]
-    checkpoint = path_from_config(config, calc_cfg["checkpoint"])
+def write_tdep_unitcell(config: dict, structure_dir: Path) -> tuple[Path, Path]:
+    """Write strict VASP5 files accepted by TDEP (without Selective dynamics)."""
+    structure_dir.mkdir(parents=True, exist_ok=True)
+    ucposcar = structure_dir / "infile.ucposcar"
+    ssposcar = structure_dir / "infile.ssposcar"
+    if not ssposcar.exists():
+        atoms = read(config_path(config, config["input"]["structure"]), format="vasp")
+        write(ucposcar, atoms, format="vasp", direct=True, vasp5=True, sort=False)
+        matrix = [str(value) for value in config["tdep"]["supercell_matrix"]]
+        run_command([tdep_executable(config, "generate_structure"), "--dimensions", *matrix], structure_dir)
+        (structure_dir / "outfile.ssposcar").replace(ssposcar)
+    return ucposcar, ssposcar
+
+
+def stage_tdep_inputs(structure_files: tuple[Path, Path], iteration_dir: Path, prior_fc: Path | None) -> None:
+    iteration_dir.mkdir(parents=True, exist_ok=True)
+    for source in structure_files:
+        target = iteration_dir / source.name
+        if not target.exists():
+            shutil.copy2(source, target)
+    if prior_fc is not None:
+        shutil.copy2(prior_fc, iteration_dir / "infile.forceconstant")
+
+
+def generate_quantum_configurations(config: dict, iteration_dir: Path, has_prior_fc: bool) -> list[Path]:
+    existing = sorted(iteration_dir.glob("contcar_conf*"))
+    wanted = int(config["sampling"]["configurations_per_iteration"])
+    if len(existing) == wanted:
+        return existing
+    if existing:
+        raise RuntimeError(f"Found {len(existing)} partial configurations in {iteration_dir}; expected {wanted}.")
+    command = [
+        tdep_executable(config, "canonical_configuration"),
+        "--temperature", str(config["tdep"]["temperature_K"]),
+        "--nconf", str(wanted),
+    ]
+    if bool(config["sampling"].get("quantum", False)):
+        command.append("--quantum")
+    if not has_prior_fc:
+        command += ["--maximum_frequency", str(config["tdep"]["initial_maximum_frequency_THz"])]
+    run_command(command, iteration_dir)
+    generated = sorted(iteration_dir.glob("contcar_conf*"))
+    if len(generated) != wanted:
+        raise RuntimeError(f"TDEP generated {len(generated)} configurations, expected {wanted}.")
+    return generated
+
+
+def sevennet_calculator(config: dict) -> SevenNetCalculator:
+    checkpoint = config_path(config, config["calculation"]["checkpoint"])
     if not checkpoint.is_file():
         raise FileNotFoundError(f"SevenNet checkpoint was not found: {checkpoint}")
-    return SevenNetCalculator(str(checkpoint), device=calc_cfg.get("device", "auto"))
+    return SevenNetCalculator(str(checkpoint), device=config["calculation"].get("device", "auto"))
 
 
-def evaluate_structures(cells, calculator: SevenNetCalculator, label: str):
-    """Evaluate energies and forces while preserving Phonopy's atom order."""
-    energies, forces = [], []
-    total = len(cells)
-    for index, cell in enumerate(cells, start=1):
-        atoms = phonopy_to_ase(cell)
+def label_configurations(configuration_files: list[Path], calculator: SevenNetCalculator):
+    atoms_list, energies, forces = [], [], []
+    total = len(configuration_files)
+    for index, filename in enumerate(configuration_files, start=1):
+        atoms = read(filename, format="vasp")
         atoms.calc = calculator
         energies.append(atoms.get_potential_energy())
         forces.append(atoms.get_forces())
+        atoms_list.append(atoms)
         if index == 1 or index % 10 == 0 or index == total:
-            print(f"  {label}: {index}/{total}", flush=True)
-    return np.asarray(energies), np.asarray(forces)
+            print(f"  SevenNet: {index}/{total}", flush=True)
+    return atoms_list, np.asarray(energies), np.asarray(forces)
 
 
-def build_initial_force_constants(config: dict, phonon: Phonopy, calculator, output: Path):
-    """Build FC2 by SevenNet finite displacements for the first sampler."""
-    fc_path = output / "iteration_00" / "force_constants.npy"
-    if fc_path.exists():
-        phonon.force_constants = np.load(fc_path)
-        return
-
-    print("Generating finite-displacement force constants (iteration 0).")
-    phonon.generate_displacements(distance=float(config["tdep"]["finite_displacement_A"]))
-    displaced = [cell for cell in phonon.supercells_with_displacements if cell is not None]
-    print(f"  SevenNet force calculations required: {len(displaced)}")
-    energies, forces = evaluate_structures(displaced, calculator, "initial FC2")
-    phonon.forces = forces
-    phonon.produce_force_constants(
-        fc_calculator=config["tdep"].get("force_constant_fitter", "symfc"),
-        calculate_full_force_constants=True,
-        show_drift=True,
-    )
-    iteration_dir = fc_path.parent
-    iteration_dir.mkdir(parents=True, exist_ok=True)
-    np.save(fc_path, phonon.force_constants)
+def write_tdep_dataset(iteration_dir: Path, atoms_list, energies: np.ndarray, forces: np.ndarray, temperature: float) -> None:
+    """Convert SevenNet-labelled POSCAR snapshots to native TDEP input files."""
+    positions = np.concatenate([atoms.get_scaled_positions(wrap=False) for atoms in atoms_list])
+    np.savetxt(iteration_dir / "infile.positions", positions, fmt="%.16e")
+    np.savetxt(iteration_dir / "infile.forces", forces.reshape(-1, 3), fmt="%.16e")
     np.save(iteration_dir / "energies_eV.npy", energies)
+    np.save(iteration_dir / "forces_eV_per_A.npy", forces)
+
+    n_atoms, n_conf = len(atoms_list[0]), len(atoms_list)
+    (iteration_dir / "infile.meta").write_text(f"{n_atoms}\n{n_conf}\n0.0\n{temperature:.8f}\n")
+    rows = [[index, 0.0, energy, energy, 0.0, temperature, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            for index, energy in enumerate(energies, start=1)]
+    np.savetxt(iteration_dir / "infile.stat", rows, fmt="%.16e")
 
 
-def displaced_cells(phonon: Phonopy, displacements: np.ndarray):
-    reference = phonopy_to_ase(phonon.supercell)
-    cells = []
-    for displacement in displacements:
-        atoms = reference.copy()
-        atoms.positions += displacement
-        cells.append(atoms)
-    return cells
+def fit_force_constants(config: dict, iteration_dir: Path) -> Path:
+    command = [
+        tdep_executable(config, "extract_forceconstants"),
+        "--secondorder_cutoff", str(config["tdep"]["secondorder_cutoff_A"]),
+        "--temperature", str(config["tdep"]["temperature_K"]),
+    ]
+    run_command(command, iteration_dir)
+    fitted = iteration_dir / "outfile.forceconstant"
+    if not fitted.is_file():
+        raise RuntimeError("TDEP did not create outfile.forceconstant.")
+    shutil.copy2(fitted, iteration_dir / "infile.forceconstant")
+    return fitted
 
 
-def calculate_dispersion(phonon: Phonopy, config: dict):
-    disp_cfg = config["dispersion"]
-    points = np.asarray(disp_cfg["qpoints"], dtype=float)
-    npoints = int(disp_cfg["points_per_segment"])
-    paths = [np.linspace(begin, end, npoints) for begin, end in zip(points[:-1], points[1:])]
-    phonon.run_band_structure(paths)
-    return [np.asarray(frequency) for frequency in phonon.band_structure.frequencies]
+def write_tdep_path(config: dict, iteration_dir: Path) -> None:
+    disp = config["dispersion"]
+    points, labels = disp["qpoints"], disp["labels"]
+    if len(points) != len(labels) or len(points) < 2:
+        raise ValueError("dispersion.qpoints and dispersion.labels must have equal length of at least two.")
+    lines = ["CUSTOM", str(int(disp["points_per_segment"])), str(len(points) - 1)]
+    for begin, end, start_label, end_label in zip(points[:-1], points[1:], labels[:-1], labels[1:]):
+        coordinates = " ".join(f"{value:.10f}" for value in [*begin, *end])
+        # TDEP's text parser expects ASCII labels; keep the Unicode Γ only in plots.
+        start_label = str(start_label).replace("Γ", "GM")
+        end_label = str(end_label).replace("Γ", "GM")
+        lines.append(f"{coordinates} {start_label} {end_label}")
+    (iteration_dir / "infile.qpoints_dispersion").write_text("\n".join(lines) + "\n")
 
 
-def plot_overlay(all_bands, config: dict, filename: Path):
-    """Overlay all completed iterations on one high-symmetry band plot."""
-    points = np.asarray(config["dispersion"]["qpoints"], dtype=float)
+def calculate_dispersion(config: dict, iteration_dir: Path) -> np.ndarray:
+    write_tdep_path(config, iteration_dir)
+    run_command([
+        tdep_executable(config, "phonon_dispersion_relations"),
+        "--readpath", "--nq_on_path", str(config["dispersion"]["points_per_segment"]), "--unit", "thz",
+    ], iteration_dir)
+    data = np.loadtxt(iteration_dir / "outfile.dispersion_relations")
+    if data.ndim != 2 or data.shape[1] < 2:
+        raise RuntimeError("Unexpected TDEP dispersion data.")
+    return data
+
+
+def plot_overlay(all_bands: list[tuple[int, np.ndarray]], config: dict, filename: Path) -> None:
     labels = config["dispersion"]["labels"]
-    reciprocal = 2 * np.pi * np.linalg.inv(np.asarray(make_phonopy(config).unitcell.cell)).T
-    segment_lengths = [np.linalg.norm((end - begin) @ reciprocal) for begin, end in zip(points[:-1], points[1:])]
-    bounds = np.r_[0.0, np.cumsum(segment_lengths)]
-
+    per_segment = int(config["dispersion"]["points_per_segment"])
+    reference_x = all_bands[-1][1][:, 0]
+    indices = [min(index * per_segment, len(reference_x) - 1) for index in range(len(labels))]
+    ticks = reference_x[indices]
     fig, ax = plt.subplots(figsize=(11, 6), constrained_layout=True)
     colors = plt.cm.viridis(np.linspace(0.15, 0.95, len(all_bands)))
-    for (iteration, bands), color in zip(all_bands, colors):
-        offset = 0.0
-        for data, length in zip(bands, segment_lengths):
-            x = offset + np.linspace(0.0, length, len(data))
-            ax.plot(x, data, color=color, alpha=0.78, lw=0.55)
-            offset += length
+    for (iteration, data), color in zip(all_bands, colors):
+        ax.plot(data[:, 0], data[:, 1:], color=color, alpha=0.78, lw=0.55)
         ax.plot([], [], color=color, lw=2, label=f"iteration {iteration}")
-    for boundary in bounds:
+    for boundary in ticks:
         ax.axvline(boundary, color="0.75", lw=0.7)
     ax.axhline(0, color="0.2", lw=0.8)
-    ax.set_xlim(bounds[0], bounds[-1])
-    ax.set_xticks(bounds)
-    ax.set_xticklabels(labels)
-    ax.set_ylabel("Frequency (THz)")
-    ax.set_title(f"TDEP phonon renormalization, {config['tdep']['temperature_K']:g} K")
+    ax.set(xlim=(reference_x[0], reference_x[-1]), xticks=ticks, xticklabels=labels, ylabel="Frequency (THz)")
+    ax.set_title(f"Native TDEP phonon renormalization, {config['tdep']['temperature_K']:g} K")
     ax.legend(ncol=2, fontsize=8, frameon=False)
     fig.savefig(filename, dpi=220)
     plt.close(fig)
 
 
-def force_rmse(force_constants: np.ndarray, displacements: np.ndarray, forces: np.ndarray) -> float:
-    predicted = -np.einsum("ijab,sjb->sia", force_constants, displacements, optimize=True)
-    return float(np.sqrt(np.mean((forces - predicted) ** 2)))
-
-
-def write_convergence(rows: list[dict], filename: Path):
-    fields = ["iteration", "force_rmse_eV_per_A", "fc_relative_change", "band_rms_change_THz"]
+def write_convergence(rows: list[dict], filename: Path) -> None:
     with filename.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=["iteration", "band_rms_change_THz"])
         writer.writeheader()
         writer.writerows(rows)
 
 
-def run(config: dict, config_path: Path, dry_run: bool = False):
-    output = path_from_config(config, config["output"]["directory"])
-    output.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(config_path, output / "config_used.yaml")
-    phonon = make_phonopy(config)
-    n_atoms = len(phonon.supercell)
-    n_configs = int(config["sampling"]["configurations_per_iteration"])
-    print(f"Supercell: {n_atoms} atoms; samples per TDEP iteration: {n_configs}")
+def run(config: dict, config_file: Path, dry_run: bool) -> None:
+    output = config_path(config, config["output"]["directory"])
+    unitcell = read(config_path(config, config["input"]["structure"]), format="vasp")
+    multiplier = int(np.prod(config["tdep"]["supercell_matrix"]))
+    print(f"Supercell: {len(unitcell) * multiplier} atoms; samples per iteration: {config['sampling']['configurations_per_iteration']}")
+    for executable in ("generate_structure", "canonical_configuration", "extract_forceconstants", "phonon_dispersion_relations"):
+        tdep_executable(config, executable)
     if dry_run:
-        print("Dry run complete. No SevenNet calculations were performed.")
+        print("Dry run complete. TDEP and SevenNet inputs were validated; no calculations were performed.")
         return
 
-    calculator = get_calculator(config)
-    build_initial_force_constants(config, phonon, calculator, output)
-    all_bands = [(0, calculate_dispersion(phonon, config))]
-    np.savez_compressed(output / "iteration_00" / "bands.npz", *all_bands[-1][1])
-    plot_overlay(all_bands, config, output / "phonon_dispersion_by_iteration.png")
-
-    previous_fc = phonon.force_constants.copy()
-    previous_flat_bands = np.concatenate(all_bands[-1][1]).ravel()
-    rows = []
+    output.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(config_file, output / "config_used.yaml")
+    structure_files = write_tdep_unitcell(config, output / "structure")
+    calculator = sevennet_calculator(config)
+    all_bands: list[tuple[int, np.ndarray]] = []
+    rows: list[dict] = []
+    previous_bands: np.ndarray | None = None
     converged = False
-    seed0 = int(config["sampling"]["random_seed"])
+
     for iteration in range(1, int(config["tdep"]["iterations"]) + 1):
         iteration_dir = output / f"iteration_{iteration:02d}"
-        iteration_dir.mkdir(exist_ok=True)
-        fc_file = iteration_dir / "force_constants.npy"
-        if fc_file.exists():
-            print(f"Resuming existing iteration {iteration}.")
-            phonon.force_constants = np.load(fc_file)
-            displacements = np.load(iteration_dir / "displacements_A.npy")
-            forces = np.load(iteration_dir / "forces_eV_per_A.npy")
+        previous_fc = output / f"iteration_{iteration - 1:02d}" / "outfile.forceconstant" if iteration > 1 else None
+        if previous_fc is not None and not previous_fc.is_file():
+            raise RuntimeError(f"Missing force constants from iteration {iteration - 1}: {previous_fc}")
+        stage_tdep_inputs(structure_files, iteration_dir, previous_fc)
+        forceconstant = iteration_dir / "outfile.forceconstant"
+        if not forceconstant.exists():
+            configurations = generate_quantum_configurations(config, iteration_dir, has_prior_fc=previous_fc is not None)
+            atoms_list, energies, forces = label_configurations(configurations, calculator)
+            write_tdep_dataset(iteration_dir, atoms_list, energies, forces, float(config["tdep"]["temperature_K"]))
+            fit_force_constants(config, iteration_dir)
         else:
-            phonon.init_random_displacements(
-                dist_func=config["sampling"]["statistics"],
-                cutoff_frequency=float(config["sampling"]["cutoff_frequency_THz"]),
-                max_distance=float(config["sampling"]["max_displacement_A"]),
-            )
-            displacements = phonon.get_random_displacements_at_temperature(
-                float(config["tdep"]["temperature_K"]),
-                number_of_snapshots=n_configs,
-                random_seed=seed0 + iteration,
-            )
-            cells = displaced_cells(phonon, displacements)
-            energies, forces = evaluate_structures(cells, calculator, f"TDEP iteration {iteration}")
-            np.save(iteration_dir / "displacements_A.npy", displacements)
-            np.save(iteration_dir / "forces_eV_per_A.npy", forces)
-            np.save(iteration_dir / "energies_eV.npy", energies)
-            phonon.dataset = {"displacements": displacements, "forces": forces, "supercell_energies": energies}
-            phonon.produce_force_constants(
-                fc_calculator=config["tdep"].get("force_constant_fitter", "symfc"),
-                calculate_full_force_constants=True,
-                show_drift=True,
-            )
-            np.save(fc_file, phonon.force_constants)
+            shutil.copy2(forceconstant, iteration_dir / "infile.forceconstant")
 
-        bands = calculate_dispersion(phonon, config)
-        np.savez_compressed(iteration_dir / "bands.npz", *bands)
-        flat_bands = np.concatenate(bands).ravel()
-        fc_change = float(np.linalg.norm(phonon.force_constants - previous_fc) / np.linalg.norm(previous_fc))
-        band_change = float(np.sqrt(np.mean((flat_bands - previous_flat_bands) ** 2)))
-        row = {
-            "iteration": iteration,
-            "force_rmse_eV_per_A": force_rmse(phonon.force_constants, displacements, forces),
-            "fc_relative_change": fc_change,
-            "band_rms_change_THz": band_change,
-        }
-        rows.append(row)
-        write_convergence(rows, output / "convergence.csv")
+        dispersion_file = iteration_dir / "outfile.dispersion_relations"
+        bands = np.loadtxt(dispersion_file) if dispersion_file.exists() else calculate_dispersion(config, iteration_dir)
+        np.save(iteration_dir / "dispersion_relations_THz.npy", bands)
         all_bands.append((iteration, bands))
         plot_overlay(all_bands, config, output / "phonon_dispersion_by_iteration.png")
-        print(json.dumps(row, indent=2), flush=True)
-
-        enough_iterations = iteration >= int(config["convergence"]["min_iterations"])
-        if enough_iterations and fc_change <= float(config["convergence"]["max_fc_relative_change"]) and band_change <= float(config["convergence"]["max_band_rms_change_THz"]):
-            converged = True
-            break
-        previous_fc = phonon.force_constants.copy()
-        previous_flat_bands = flat_bands.copy()
+        if previous_bands is not None:
+            if bands.shape != previous_bands.shape:
+                raise RuntimeError("TDEP dispersion grids changed between iterations.")
+            change = float(np.sqrt(np.mean((bands[:, 1:] - previous_bands[:, 1:]) ** 2)))
+            rows.append({"iteration": iteration, "band_rms_change_THz": change})
+            write_convergence(rows, output / "convergence.csv")
+            print(json.dumps(rows[-1], indent=2), flush=True)
+            if iteration >= int(config["convergence"]["min_iterations"]) and change <= float(config["convergence"]["max_band_rms_change_THz"]):
+                converged = True
+                break
+        previous_bands = bands.copy()
 
     with (output / "run_summary.json").open("w") as handle:
-        json.dump({"converged": converged, "completed_tdep_iterations": len(rows), "supercell_atoms": n_atoms}, handle, indent=2)
+        json.dump({"converged": converged, "completed_tdep_iterations": len(all_bands), "supercell_atoms": len(unitcell) * multiplier}, handle, indent=2)
     print(f"Finished. Converged: {converged}. Results: {output}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="tdep_tetragonal.yaml", type=Path)
-    parser.add_argument("--dry-run", action="store_true", help="Validate structure/settings without ML evaluations.")
+    parser.add_argument("--dry-run", action="store_true", help="Validate paths and settings without TDEP or SevenNet calculations.")
     args = parser.parse_args()
-    config_path = args.config.resolve()
+    config_file = args.config.resolve()
     try:
-        run(load_config(config_path), config_path, dry_run=args.dry_run)
+        run(load_config(config_file), config_file, args.dry_run)
     except Exception as error:
         print(f"ERROR: {error}", file=sys.stderr)
         raise
