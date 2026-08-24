@@ -2,9 +2,6 @@
 # Paths are interpreted relative to this file.
 input:
   structure: tetragonal/CONTCAR_tet
-  # Keeping the supplied P-tetragonal cell as the phonon primitive cell.
-  primitive_matrix: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
-  symprec: 0.01
 
 calculation:
   checkpoint: checkpoint_fine_tuned_al_round1.pth
@@ -19,7 +16,9 @@ tdep:
   # Used only in iteration 1 to construct TDEP's initial fake FC2. Subsequent
   # samplings use the FC2 fitted by extract_forceconstants in the last iteration.
   initial_maximum_frequency_THz: 100.0
-  secondorder_cutoff_A: 8.0
+  # Must not exceed the radius of the supercell's largest inscribed sphere.
+  # For the 3x3x2 cell (c = 12.56 Å), 6.0 Å is safely below the 6.28 Å limit.
+  secondorder_cutoff_A: 6.0
 
 sampling:
   quantum: true                # canonical Bose-Einstein/zero-point sampling
@@ -44,4 +43,5 @@ dispersion:
   labels: ["Γ", "X", "M", "Γ", "Z", "R", "A", "Z"]
 
 output:
-  directory: tdep_tetragonal_300K
+  # Use a new directory whenever temperature, supercell, cutoff, or checkpoint changes.
+  directory: tdep_tetragonal_300K_rc2_6A

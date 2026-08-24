@@ -73,6 +73,20 @@ def write_tdep_unitcell(config: dict, structure_dir: Path) -> tuple[Path, Path]:
     return ucposcar, ssposcar
 
 
+def validate_cutoff(config: dict, ssposcar: Path) -> None:
+    """Reject FC cutoffs that cannot be represented uniquely by this supercell."""
+    cell = np.asarray(read(ssposcar, format="vasp").cell, dtype=float)
+    volume = abs(float(np.linalg.det(cell)))
+    heights = [volume / np.linalg.norm(np.cross(cell[(axis + 1) % 3], cell[(axis + 2) % 3])) for axis in range(3)]
+    safe_cutoff = 0.5 * min(heights)
+    requested = float(config["tdep"]["secondorder_cutoff_A"])
+    if requested > safe_cutoff + 1e-8:
+        raise ValueError(
+            f"secondorder_cutoff_A={requested:.3f} Å exceeds this supercell's safe maximum "
+            f"of {safe_cutoff:.3f} Å. Lower the cutoff or enlarge the supercell."
+        )
+
+
 def stage_tdep_inputs(structure_files: tuple[Path, Path], iteration_dir: Path, prior_fc: Path | None) -> None:
     iteration_dir.mkdir(parents=True, exist_ok=True)
     for source in structure_files:
@@ -226,8 +240,16 @@ def run(config: dict, config_file: Path, dry_run: bool) -> None:
         return
 
     output.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(config_file, output / "config_used.yaml")
+    config_snapshot = output / "config_used.yaml"
+    if config_snapshot.exists() and config_snapshot.read_text() != config_file.read_text():
+        raise RuntimeError(
+            f"{output} was created with a different configuration. Choose a new output.directory "
+            "or archive the existing output before running."
+        )
+    if not config_snapshot.exists():
+        shutil.copy2(config_file, config_snapshot)
     structure_files = write_tdep_unitcell(config, output / "structure")
+    validate_cutoff(config, structure_files[1])
     calculator = sevennet_calculator(config)
     all_bands: list[tuple[int, np.ndarray]] = []
     rows: list[dict] = []

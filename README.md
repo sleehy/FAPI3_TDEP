@@ -20,6 +20,7 @@ The supplied configuration runs at 300 K with the following settings:
 - 200 stochastic configurations per TDEP iteration
 - SevenNet energy and force calculations using `checkpoint_fine_tuned_al_round1.pth`
 - Native TDEP `extract_forceconstants` fitting and `phonon_dispersion_relations` on the tetragonal Γ–X–M–Γ–Z–R–A–Z path
+- 6.0 Å FC2 cutoff, safely below the 6.28 Å limit of the 3 × 3 × 2 supercell along its shortest direction
 
 ## Setup and run
 
@@ -58,6 +59,6 @@ Set `tdep.temperature_K` in `tdep_tetragonal.yaml` before production if a temper
 
 ## Outputs
 
-The configured output directory (`tdep_tetragonal_300K/` by default) contains per-iteration TDEP inputs/outputs, SevenNet energies and forces, fitted FC2 (`outfile.forceconstant`), and phonon bands. `phonon_dispersion_by_iteration.png` overlays each iteration so renormalization convergence is visible; `convergence.csv` records the dispersion change.
+The configured output directory (`tdep_tetragonal_300K_rc2_6A/` by default) contains per-iteration TDEP inputs/outputs, SevenNet energies and forces, fitted FC2 (`outfile.forceconstant`), and phonon bands. `phonon_dispersion_by_iteration.png` overlays each iteration so renormalization convergence is visible; `convergence.csv` records the dispersion change.
 
-These generated outputs are intentionally ignored by Git. Keep an archived result directory or a DOI-backed data repository for production data that should be shared.
+The script rejects FC2 cutoffs larger than the supercell's largest safe inscribed-sphere radius. It also refuses to reuse an output directory whose saved config differs from the active config. Change `output.directory` whenever the temperature, supercell, cutoff, or checkpoint changes. Generated outputs are intentionally ignored by Git; keep an archived result directory or a DOI-backed data repository for production data that should be shared.
