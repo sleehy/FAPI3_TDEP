@@ -137,9 +137,12 @@ def write_tdep_dataset(iteration_dir: Path, atoms_list, energies: np.ndarray, fo
 
     n_atoms, n_conf = len(atoms_list[0]), len(atoms_list)
     (iteration_dir / "infile.meta").write_text(f"{n_atoms}\n{n_conf}\n0.0\n{temperature:.8f}\n")
-    rows = [[index, 0.0, energy, energy, 0.0, temperature, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-            for index, energy in enumerate(energies, start=1)]
-    np.savetxt(iteration_dir / "infile.stat", rows, fmt="%.16e")
+    # TDEP requires an integer configuration index in column 1; the remaining
+    # 12 columns (time, energies, T/P, and six stress components) are reals.
+    with (iteration_dir / "infile.stat").open("w") as handle:
+        for index, energy in enumerate(energies, start=1):
+            values = [0.0, energy, energy, 0.0, temperature, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            handle.write(f"{index:d} " + " ".join(f"{value:.16e}" for value in values) + "\n")
 
 
 def fit_force_constants(config: dict, iteration_dir: Path) -> Path:
