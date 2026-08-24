@@ -1,0 +1,3 @@
+[submodule "external/tdep"]
+	path = external/tdep
+	url = https://github.com/tdep-developers/tdep.git

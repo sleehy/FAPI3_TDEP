@@ -11,8 +11,8 @@ calculation:
   device: auto                 # e.g. cuda, cuda:0, or cpu
 
 tdep:
-  # Native TDEP executables. Change this path on a different machine.
-  bin_dir: /home/eoung/tdep/bin
+  # Official tdep-developers/tdep submodule, built by scripts/setup_tdep.sh.
+  bin_dir: external/tdep/bin
   temperature_K: 300.0         # finite-temperature target; change as needed
   supercell_matrix: [3, 3, 2]  # 24 atoms x 3 x 3 x 2 = 432 atoms
   iterations: 5

@@ -7,6 +7,7 @@ Configuration-driven stochastic TDEP phonon renormalization for tetragonal FAPbI
 - `tetragonal/CONTCAR_tet`: tetragonal FAPbI3 input structure.
 - `orthorhombic/CONTCAR`: companion orthorhombic structure.
 - `checkpoint_fine_tuned_al_round1.pth`: SevenNet model checkpoint used by the workflow.
+- `external/tdep`: pinned [official TDEP](https://github.com/tdep-developers/tdep) Git submodule.
 - `tdep_tetragonal.yaml`: all run parameters.
 - `scripts/run_tdep.py`: self-consistent TDEP workflow.
 
@@ -22,13 +23,34 @@ The supplied configuration runs at 300 K with the following settings:
 
 ## Setup and run
 
-Use an environment containing Python 3.11+ and the packages in `requirements.txt`. Set `tdep.bin_dir` to the directory containing the TDEP executables; the supplied configuration uses `/home/eoung/tdep/bin`. The calculation was prepared with SevenNet 0.11.2 and the native TDEP build in that location.
+Clone with the pinned official TDEP source, then build it locally. TDEP is native Fortran software, so its build requires a Fortran compiler, BLAS/LAPACK, FFTW, MPI, and HDF5 with Fortran support. The provided setup script follows TDEP's official Conda instructions.
 
 ```bash
+git clone --recurse-submodules https://github.com/sleehy/FAPI3_TDEP.git
+cd FAPI3_TDEP
+conda create -n fapi3-tdep -c conda-forge python=3.11 gfortran openmpi-mpifort scalapack fftw hdf5
+conda activate fapi3-tdep
+export TDEP_PREFIX="$CONDA_PREFIX"
+bash scripts/setup_tdep.sh
 python -m pip install -r requirements.txt
+```
+
+For an existing clone that lacks the submodule, run:
+
+```bash
+git submodule update --init --recursive
+export TDEP_PREFIX="$CONDA_PREFIX"
+bash scripts/setup_tdep.sh
+```
+
+Then validate and run the calculation:
+
+```bash
 python scripts/run_tdep.py --config tdep_tetragonal.yaml --dry-run
 python scripts/run_tdep.py --config tdep_tetragonal.yaml
 ```
+
+`external/tdep` is pinned to a specific official revision. To intentionally update it later, use `git submodule update --remote external/tdep`, test the workflow, and commit the resulting gitlink change.
 
 Set `tdep.temperature_K` in `tdep_tetragonal.yaml` before production if a temperature other than 300 K is required. If a calculation stops, rerun the same command: completed iterations are reused.
 

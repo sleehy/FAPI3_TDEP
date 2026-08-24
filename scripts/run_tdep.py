@@ -52,7 +52,10 @@ def run_command(command: list[str], cwd: Path) -> None:
 def tdep_executable(config: dict, name: str) -> str:
     executable = config_path(config, config["tdep"]["bin_dir"]) / name
     if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise FileNotFoundError(f"TDEP executable not found or not executable: {executable}")
+        raise FileNotFoundError(
+            f"TDEP executable not found or not executable: {executable}. "
+            "Initialize the submodule and run: bash scripts/setup_tdep.sh"
+        )
     return str(executable)
 
 
