@@ -35,6 +35,8 @@ bash scripts/setup_tdep.sh
 python -m pip install -r requirements.txt
 ```
 
+`setup_tdep.sh` applies the included compatibility patch before building. It relaxes TDEP's internal symmetry tolerance from `1e-5` to `1e-4` Å (`lo_sqtol` from `1e-10` to `1e-8`) to avoid the known `Bad operation singlets` numerical failure on some x86/BLAS builds. This is a local build patch; the tracked TDEP submodule itself remains pinned to the official revision. If TDEP was already built before pulling this change, run `bash scripts/setup_tdep.sh --rebuild`.
+
 For an existing clone that lacks the submodule, run:
 
 ```bash

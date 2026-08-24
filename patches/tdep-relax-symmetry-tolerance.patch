@@ -1,0 +1,13 @@
+diff --git a/src/libolle/konstanter.f90 b/src/libolle/konstanter.f90
+index 7e4219d..0000000 100644
+--- a/src/libolle/konstanter.f90
++++ b/src/libolle/konstanter.f90
+@@ -110,7 +110,7 @@ real(flyt), parameter :: lo_kappa_SI_to_au=lo_Hartree_to_Joule/lo_time_au_to_s/
+ 
+ ! Some default tolerances
+ !> Tolerance for realspace distances to be 0
+-real(flyt), parameter :: lo_tol=1E-5_flyt
++real(flyt), parameter :: lo_tol=1E-4_flyt
+ !> Tolerance for realspace squared distances to be 0
+ real(flyt), parameter :: lo_sqtol=lo_tol**2
+ !> Tolerance for reciprocal distances to be 0
