@@ -1,0 +1,49 @@
+# Self-consistent harmonic/TDEP renormalization of tetragonal FAPbI3.
+# Paths are interpreted relative to this file.
+input:
+  structure: tetragonal/CONTCAR_tet
+  # Keeping the supplied P-tetragonal cell as the phonon primitive cell.
+  primitive_matrix: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+  symprec: 0.01
+
+calculation:
+  checkpoint: checkpoint_fine_tuned_al_round1.pth
+  device: auto                 # e.g. cuda, cuda:0, or cpu
+
+tdep:
+  temperature_K: 300.0         # finite-temperature target; change as needed
+  supercell_matrix: [3, 3, 2]  # 24 atoms x 3 x 3 x 2 = 432 atoms
+  iterations: 5
+  finite_displacement_A: 0.01  # used only to construct iteration-0 FC2
+  force_constant_fitter: symfc # symmetry-constrained least-squares FC2 fit
+
+sampling:
+  statistics: quantum          # canonical Bose-Einstein/zero-point sampling
+  configurations_per_iteration: 200
+  random_seed: 20260824
+  # Modes at or below this value (including imaginary modes) are excluded
+  # from the harmonic distribution because their canonical variance is undefined.
+  cutoff_frequency_THz: 0.10
+  max_displacement_A: 0.35
+
+convergence:
+  min_iterations: 2
+  max_fc_relative_change: 0.02
+  max_band_rms_change_THz: 0.05
+
+dispersion:
+  points_per_segment: 81
+  # Tetragonal path: Gamma-X-M-Gamma-Z-R-A-Z
+  qpoints:
+    - [0.0, 0.0, 0.0]
+    - [0.5, 0.0, 0.0]
+    - [0.5, 0.5, 0.0]
+    - [0.0, 0.0, 0.0]
+    - [0.0, 0.0, 0.5]
+    - [0.5, 0.0, 0.5]
+    - [0.5, 0.5, 0.5]
+    - [0.0, 0.0, 0.5]
+  labels: ["Γ", "X", "M", "Γ", "Z", "R", "A", "Z"]
+
+output:
+  directory: tdep_tetragonal_300K

@@ -1,0 +1,28 @@
+# Python and editor state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.idea/
+.vscode/
+.DS_Store
+
+# TDEP workflow outputs (reproducible from the tracked config and checkpoint)
+tdep_tetragonal_*/
+*.log
+
+# Common VASP/phonon intermediate and large restart files
+WAVECAR
+CHGCAR
+CHG
+vasprun.xml
+OUTCAR
+OSZICAR
+XDATCAR
+FORCE_SETS
+FORCE_CONSTANTS
+band.yaml
+
+# Local virtual environments
+.venv/
+venv/
