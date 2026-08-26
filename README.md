@@ -62,3 +62,22 @@ Set `tdep.temperature_K` in `tdep_tetragonal.yaml` before production if a temper
 The configured output directory (`tdep_tetragonal_300K_rc2_6A/` by default) contains per-iteration TDEP inputs/outputs, SevenNet energies and forces, fitted FC2 (`outfile.forceconstant`), and phonon bands. `phonon_dispersion_by_iteration.png` overlays each iteration so renormalization convergence is visible; `convergence.csv` records the dispersion change.
 
 The script rejects FC2 cutoffs larger than the supercell's largest safe inscribed-sphere radius. It also refuses to reuse an output directory whose saved config differs from the active config. Change `output.directory` whenever the temperature, supercell, cutoff, or checkpoint changes. Generated outputs are intentionally ignored by Git; keep an archived result directory or a DOI-backed data repository for production data that should be shared.
+
+## Plot a TDEP band structure and PDOS
+
+After a TDEP iteration has fitted `outfile.forceconstant`, create a combined
+dispersion and element-resolved projected DOS plot with:
+
+```bash
+python scripts/plot_tdep_phonons.py \
+  --result-dir tdep_tetragonal_300K_rc2_6A/iteration_05 \
+  --qmesh 24 24 24 \
+  --title "FAPbI3, 300 K"
+```
+
+The script runs TDEP's official `phonon_dispersion_relations --dos` to create
+`outfile.dispersion_relations.hdf5` and `outfile.phonon_dos.hdf5`, then reads
+those native files to write `phonon_band_pdos.png`. Use `--reuse` to redraw an
+existing pair of HDF5 outputs without recalculating phonons. TDEP stores PDOS
+per symmetry-unique atom site; this script sums sites with the same chemical
+element (for example, `Pb_1` and `Pb_2`) before plotting.
