@@ -223,9 +223,30 @@ def plot_overlay(all_bands: list[tuple[int, np.ndarray]], config: dict, filename
 
 def write_convergence(rows: list[dict], filename: Path) -> None:
     with filename.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["iteration", "band_rms_change_THz"])
+        writer = csv.DictWriter(handle, fieldnames=["iteration", "omega_rmse_THz"])
         writer.writeheader()
         writer.writerows(rows)
+
+
+def plot_omega_rmse(rows: list[dict], threshold: float, filename: Path) -> None:
+    """Plot the RMSE in phonon frequencies between consecutive TDEP iterations."""
+    iterations = [row["iteration"] for row in rows]
+    rmse = [row["omega_rmse_THz"] for row in rows]
+    fig, ax = plt.subplots(figsize=(6.5, 4.2), constrained_layout=True)
+    ax.plot(iterations, rmse, marker="o", color="C0", lw=1.6, label="Consecutive iterations")
+    ax.axhline(threshold, color="C3", ls="--", lw=1.1, label=f"Convergence threshold ({threshold:g} THz)")
+    ax.set(
+        xlabel="TDEP iteration",
+        ylabel="RMSE(Δω) (THz)",
+        xticks=iterations,
+        title="Phonon-frequency convergence",
+    )
+    ax.set_xlim(min(iterations) - 0.25, max(iterations) + 0.25)
+    ax.set_ylim(bottom=0.0)
+    ax.grid(axis="y", color="0.85", lw=0.7)
+    ax.legend(frameon=False, fontsize=9)
+    fig.savefig(filename, dpi=220)
+    plt.close(fig)
 
 
 def run(config: dict, config_file: Path, dry_run: bool) -> None:
@@ -279,11 +300,14 @@ def run(config: dict, config_file: Path, dry_run: bool) -> None:
         if previous_bands is not None:
             if bands.shape != previous_bands.shape:
                 raise RuntimeError("TDEP dispersion grids changed between iterations.")
-            change = float(np.sqrt(np.mean((bands[:, 1:] - previous_bands[:, 1:]) ** 2)))
-            rows.append({"iteration": iteration, "band_rms_change_THz": change})
+            if not np.allclose(bands[:, 0], previous_bands[:, 0]):
+                raise RuntimeError("TDEP dispersion q-point grids changed between iterations.")
+            omega_rmse = float(np.sqrt(np.mean((bands[:, 1:] - previous_bands[:, 1:]) ** 2)))
+            rows.append({"iteration": iteration, "omega_rmse_THz": omega_rmse})
             write_convergence(rows, output / "convergence.csv")
+            plot_omega_rmse(rows, float(config["convergence"]["max_band_rms_change_THz"]), output / "omega_rmse_by_iteration.png")
             print(json.dumps(rows[-1], indent=2), flush=True)
-            if iteration >= int(config["convergence"]["min_iterations"]) and change <= float(config["convergence"]["max_band_rms_change_THz"]):
+            if iteration >= int(config["convergence"]["min_iterations"]) and omega_rmse <= float(config["convergence"]["max_band_rms_change_THz"]):
                 converged = True
                 break
         previous_bands = bands.copy()
