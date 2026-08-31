@@ -4,7 +4,7 @@ input:
   structure: tetragonal/CONTCAR_tet
 
 calculation:
-  checkpoint: checkpoint_fine_tuned_al_round1.pth
+  checkpoint: checkpoint_fine_tuned_al_round2.pth
   device: auto                 # e.g. cuda, cuda:0, or cpu
 
 tdep:
