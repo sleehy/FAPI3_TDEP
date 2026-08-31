@@ -5,13 +5,12 @@ TDEP owns the lattice-dynamics steps: ``generate_structure`` builds the
 supercell, ``canonical_configuration --quantum`` samples it,
 ``extract_forceconstants`` fits FC2, and ``phonon_dispersion_relations``
 calculates each iteration's bands. Python only handles config, SevenNet labels,
-TDEP file conversion, and the convergence-overlay plot.
+TDEP file conversion, phonon-property plots, and interactive snapshot review.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import shutil
@@ -37,6 +36,31 @@ def load_config(path: Path) -> dict:
         raise ValueError("The configuration must be a YAML mapping.")
     config["_config_dir"] = path.parent.resolve()
     return config
+
+
+def config_snapshot_matches(snapshot: Path, config_file: Path) -> bool:
+    """Allow resuming runs made before default post-processing settings were added."""
+    snapshot_text = snapshot.read_text()
+    config_text = config_file.read_text()
+    if snapshot_text == config_text:
+        return True
+    try:
+        previous = yaml.safe_load(snapshot_text)
+        current = yaml.safe_load(config_text)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        return False
+    previous.pop("convergence", None)
+    current.pop("convergence", None)
+    previous_dispersion = previous.get("dispersion")
+    if isinstance(previous_dispersion, dict):
+        previous_dispersion.setdefault("overlay_start_iteration", 1)
+        previous_dispersion.setdefault("overlay_interval", 3)
+    previous_free_energy = previous.setdefault("free_energy", {})
+    if isinstance(previous_free_energy, dict):
+        previous_free_energy.setdefault("qpoint_grid", [24, 24, 24])
+    return previous == current
 
 
 def config_path(config: dict, value: str) -> Path:
@@ -141,6 +165,86 @@ def label_configurations(configuration_files: list[Path], calculator: SevenNetCa
     return atoms_list, np.asarray(energies), np.asarray(forces)
 
 
+def validate_configurations(atoms_list) -> None:
+    """Ensure manually replaced snapshots remain compatible with TDEP's dataset."""
+    reference = atoms_list[0]
+    reference_symbols = reference.get_chemical_symbols()
+    reference_cell = np.asarray(reference.cell)
+    for index, atoms in enumerate(atoms_list[1:], start=2):
+        if atoms.get_chemical_symbols() != reference_symbols:
+            raise ValueError(
+                f"Configuration {index} has a different atom count, species, or atom order. "
+                "Replacement configurations must preserve the original supercell atom order."
+            )
+        if not np.allclose(atoms.cell, reference_cell, rtol=1e-8, atol=1e-8):
+            raise ValueError(
+                f"Configuration {index} has a different cell. "
+                "Replacement configurations must use the same supercell lattice."
+            )
+
+
+def write_energy_review(iteration_dir: Path, configuration_files: list[Path], energies: np.ndarray) -> tuple[Path, Path]:
+    """Write an energy-to-snapshot map and a histogram for manual screening."""
+    atoms_per_configuration = len(read(configuration_files[0], format="vasp"))
+    energy_csv = iteration_dir / "mlp_energies.csv"
+    histogram = iteration_dir / "mlp_energy_histogram.png"
+    order = np.argsort(energies)[::-1]
+    with energy_csv.open("w") as handle:
+        handle.write("configuration,mlp_energy_eV,mlp_energy_eV_per_atom\n")
+        for index in order:
+            handle.write(
+                f"{configuration_files[index].name},{energies[index]:.16e},"
+                f"{energies[index] / atoms_per_configuration:.16e}\n"
+            )
+
+    bins = min(40, max(10, int(np.ceil(np.sqrt(len(energies))))))
+    fig, ax = plt.subplots(figsize=(7.2, 4.5), constrained_layout=True)
+    ax.hist(energies, bins=bins, color="C0", edgecolor="white", linewidth=0.7)
+    ax.set(
+        xlabel="SevenNet MLP energy (eV/configuration)",
+        ylabel="Number of configurations",
+        title=f"TDEP iteration {iteration_dir.name.split('_')[-1]}: MLP energy distribution",
+    )
+    ax.grid(axis="y", color="0.88", linewidth=0.7)
+    fig.savefig(histogram, dpi=220)
+    plt.close(fig)
+    return energy_csv, histogram
+
+
+def review_configurations(iteration: int, iteration_dir: Path, configuration_files: list[Path], calculator: SevenNetCalculator):
+    """Pause for user inspection; relabel after any manual snapshot replacements."""
+    while True:
+        atoms_list, energies, forces = label_configurations(configuration_files, calculator)
+        validate_configurations(atoms_list)
+        energy_csv, histogram = write_energy_review(iteration_dir, configuration_files, energies)
+        print(
+            f"\nIteration {iteration} review is ready.\n"
+            f"  Histogram: {histogram}\n"
+            f"  Energy-to-file map (highest energy first): {energy_csv}\n"
+            "Inspect any configurations of concern in VESTA. To replace one, overwrite the "
+            "corresponding contcar_conf* file while preserving its filename, cell, atom count, "
+            "species, and atom order.\n"
+            "Enter [c] to accept these configurations and fit FC2, [r] after replacements to "
+            "recalculate energies and redraw the histogram, or [q] to stop: ",
+            end="",
+            flush=True,
+        )
+        try:
+            response = input().strip().lower()
+        except EOFError as error:
+            raise RuntimeError(
+                "Interactive configuration review requires a terminal. Run this command in a "
+                "terminal and accept each iteration with 'c'."
+            ) from error
+        if response in {"c", "continue"}:
+            return atoms_list, energies, forces
+        if response in {"r", "review", "relabel"}:
+            continue
+        if response in {"q", "quit", "stop"}:
+            raise KeyboardInterrupt(f"Stopped during configuration review for iteration {iteration}.")
+        print("Please enter 'c', 'r', or 'q'.", flush=True)
+
+
 def write_tdep_dataset(iteration_dir: Path, atoms_list, energies: np.ndarray, forces: np.ndarray, temperature: float) -> None:
     """Convert SevenNet-labelled POSCAR snapshots to native TDEP input files."""
     positions = np.concatenate([atoms.get_scaled_positions(wrap=False) for atoms in atoms_list])
@@ -188,16 +292,53 @@ def write_tdep_path(config: dict, iteration_dir: Path) -> None:
     (iteration_dir / "infile.qpoints_dispersion").write_text("\n".join(lines) + "\n")
 
 
-def calculate_dispersion(config: dict, iteration_dir: Path) -> np.ndarray:
+def free_energy_qpoint_grid(config: dict) -> list[str]:
+    qpoint_grid = config.get("free_energy", {}).get("qpoint_grid", [24, 24, 24])
+    if not isinstance(qpoint_grid, list) or len(qpoint_grid) != 3 or any(int(value) < 1 for value in qpoint_grid):
+        raise ValueError("free_energy.qpoint_grid must contain three positive integers.")
+    return [str(int(value)) for value in qpoint_grid]
+
+
+def calculate_phonon_properties(config: dict, iteration_dir: Path) -> np.ndarray:
+    """Calculate the path dispersion and F_vib at the target temperature."""
     write_tdep_path(config, iteration_dir)
     run_command([
         tdep_executable(config, "phonon_dispersion_relations"),
         "--readpath", "--nq_on_path", str(config["dispersion"]["points_per_segment"]), "--unit", "thz",
+        "--qpoint_grid", *free_energy_qpoint_grid(config),
+        "--temperature", str(config["tdep"]["temperature_K"]),
     ], iteration_dir)
     data = np.loadtxt(iteration_dir / "outfile.dispersion_relations")
     if data.ndim != 2 or data.shape[1] < 2:
         raise RuntimeError("Unexpected TDEP dispersion data.")
+    if not (iteration_dir / "outfile.free_energy").is_file():
+        raise RuntimeError("TDEP did not create outfile.free_energy.")
     return data
+
+
+def read_vibrational_free_energy(iteration_dir: Path, temperature: float) -> float:
+    """Read F_vib (eV/atom) at the configured temperature from native TDEP output."""
+    filename = iteration_dir / "outfile.free_energy"
+    try:
+        data = np.atleast_2d(np.loadtxt(filename))
+    except ValueError as error:
+        raise RuntimeError(f"Could not parse TDEP free-energy output: {filename}") from error
+    if data.shape[1] < 2:
+        raise RuntimeError(f"Unexpected TDEP free-energy data in {filename}.")
+    index = int(np.argmin(np.abs(data[:, 0] - temperature)))
+    if not np.isclose(data[index, 0], temperature, rtol=0.0, atol=1e-4):
+        raise RuntimeError(f"{filename} does not contain the requested temperature {temperature:g} K.")
+    return float(data[index, 1])
+
+
+def selected_for_dispersion_overlay(iteration: int, config: dict) -> bool:
+    """Select iterations 1, 4, 7, ... by default for an uncluttered overlay."""
+    dispersion = config["dispersion"]
+    start = int(dispersion.get("overlay_start_iteration", 1))
+    interval = int(dispersion.get("overlay_interval", 3))
+    if start < 1 or interval < 1:
+        raise ValueError("dispersion.overlay_start_iteration and overlay_interval must be positive integers.")
+    return iteration >= start and (iteration - start) % interval == 0
 
 
 def plot_overlay(all_bands: list[tuple[int, np.ndarray]], config: dict, filename: Path) -> None:
@@ -215,37 +356,37 @@ def plot_overlay(all_bands: list[tuple[int, np.ndarray]], config: dict, filename
         ax.axvline(boundary, color="0.75", lw=0.7)
     ax.axhline(0, color="0.2", lw=0.8)
     ax.set(xlim=(reference_x[0], reference_x[-1]), xticks=ticks, xticklabels=labels, ylabel="Frequency (THz)")
-    ax.set_title(f"Native TDEP phonon renormalization, {config['tdep']['temperature_K']:g} K")
+    ax.set_title(
+        f"Native TDEP phonon renormalization (iterations "
+        f"{config['dispersion'].get('overlay_start_iteration', 1)}, "
+        f"{int(config['dispersion'].get('overlay_start_iteration', 1)) + int(config['dispersion'].get('overlay_interval', 3))}, ...), "
+        f"{config['tdep']['temperature_K']:g} K"
+    )
     ax.legend(ncol=2, fontsize=8, frameon=False)
     fig.savefig(filename, dpi=220)
     plt.close(fig)
 
 
-def write_convergence(rows: list[dict], filename: Path) -> None:
-    with filename.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["iteration", "omega_rmse_THz"])
-        writer.writeheader()
-        writer.writerows(rows)
+def write_free_energy_history(rows: list[tuple[int, float]], temperature: float, output: Path) -> None:
+    """Write and plot the per-iteration vibrational free-energy history."""
+    csv_file = output / "phonon_free_energy_by_iteration.csv"
+    with csv_file.open("w") as handle:
+        handle.write("iteration,temperature_K,vibrational_free_energy_eV_per_atom\n")
+        for iteration, free_energy in rows:
+            handle.write(f"{iteration},{temperature:.8f},{free_energy:.16e}\n")
 
-
-def plot_omega_rmse(rows: list[dict], threshold: float, filename: Path) -> None:
-    """Plot the RMSE in phonon frequencies between consecutive TDEP iterations."""
-    iterations = [row["iteration"] for row in rows]
-    rmse = [row["omega_rmse_THz"] for row in rows]
-    fig, ax = plt.subplots(figsize=(6.5, 4.2), constrained_layout=True)
-    ax.plot(iterations, rmse, marker="o", color="C0", lw=1.6, label="Consecutive iterations")
-    ax.axhline(threshold, color="C3", ls="--", lw=1.1, label=f"Convergence threshold ({threshold:g} THz)")
+    iterations = [row[0] for row in rows]
+    free_energies = [row[1] for row in rows]
+    fig, ax = plt.subplots(figsize=(7.0, 4.5), constrained_layout=True)
+    ax.plot(iterations, free_energies, marker="o", color="C2", lw=1.6)
     ax.set(
         xlabel="TDEP iteration",
-        ylabel="RMSE(Δω) (THz)",
+        ylabel="Vibrational free energy (eV/atom)",
         xticks=iterations,
-        title="Phonon-frequency convergence",
+        title=f"Phonon free energy at {temperature:g} K",
     )
-    ax.set_xlim(min(iterations) - 0.25, max(iterations) + 0.25)
-    ax.set_ylim(bottom=0.0)
-    ax.grid(axis="y", color="0.85", lw=0.7)
-    ax.legend(frameon=False, fontsize=9)
-    fig.savefig(filename, dpi=220)
+    ax.grid(axis="both", color="0.88", linewidth=0.7)
+    fig.savefig(output / "phonon_free_energy_by_iteration.png", dpi=220)
     plt.close(fig)
 
 
@@ -262,7 +403,7 @@ def run(config: dict, config_file: Path, dry_run: bool) -> None:
 
     output.mkdir(parents=True, exist_ok=True)
     config_snapshot = output / "config_used.yaml"
-    if config_snapshot.exists() and config_snapshot.read_text() != config_file.read_text():
+    if config_snapshot.exists() and not config_snapshot_matches(config_snapshot, config_file):
         raise RuntimeError(
             f"{output} was created with a different configuration. Choose a new output.directory "
             "or archive the existing output before running."
@@ -272,10 +413,8 @@ def run(config: dict, config_file: Path, dry_run: bool) -> None:
     structure_files = write_tdep_unitcell(config, output / "structure")
     validate_cutoff(config, structure_files[1])
     calculator = sevennet_calculator(config)
-    all_bands: list[tuple[int, np.ndarray]] = []
-    rows: list[dict] = []
-    previous_bands: np.ndarray | None = None
-    converged = False
+    selected_bands: list[tuple[int, np.ndarray]] = []
+    free_energy_rows: list[tuple[int, float]] = []
 
     for iteration in range(1, int(config["tdep"]["iterations"]) + 1):
         iteration_dir = output / f"iteration_{iteration:02d}"
@@ -286,35 +425,38 @@ def run(config: dict, config_file: Path, dry_run: bool) -> None:
         forceconstant = iteration_dir / "outfile.forceconstant"
         if not forceconstant.exists():
             configurations = generate_quantum_configurations(config, iteration_dir, has_prior_fc=previous_fc is not None)
-            atoms_list, energies, forces = label_configurations(configurations, calculator)
+            atoms_list, energies, forces = review_configurations(iteration, iteration_dir, configurations, calculator)
             write_tdep_dataset(iteration_dir, atoms_list, energies, forces, float(config["tdep"]["temperature_K"]))
             fit_force_constants(config, iteration_dir)
         else:
             shutil.copy2(forceconstant, iteration_dir / "infile.forceconstant")
 
         dispersion_file = iteration_dir / "outfile.dispersion_relations"
-        bands = np.loadtxt(dispersion_file) if dispersion_file.exists() else calculate_dispersion(config, iteration_dir)
+        free_energy_file = iteration_dir / "outfile.free_energy"
+        if dispersion_file.exists() and free_energy_file.exists():
+            bands = np.loadtxt(dispersion_file)
+        else:
+            bands = calculate_phonon_properties(config, iteration_dir)
         np.save(iteration_dir / "dispersion_relations_THz.npy", bands)
-        all_bands.append((iteration, bands))
-        plot_overlay(all_bands, config, output / "phonon_dispersion_by_iteration.png")
-        if previous_bands is not None:
-            if bands.shape != previous_bands.shape:
-                raise RuntimeError("TDEP dispersion grids changed between iterations.")
-            if not np.allclose(bands[:, 0], previous_bands[:, 0]):
-                raise RuntimeError("TDEP dispersion q-point grids changed between iterations.")
-            omega_rmse = float(np.sqrt(np.mean((bands[:, 1:] - previous_bands[:, 1:]) ** 2)))
-            rows.append({"iteration": iteration, "omega_rmse_THz": omega_rmse})
-            write_convergence(rows, output / "convergence.csv")
-            plot_omega_rmse(rows, float(config["convergence"]["max_band_rms_change_THz"]), output / "omega_rmse_by_iteration.png")
-            print(json.dumps(rows[-1], indent=2), flush=True)
-            if iteration >= int(config["convergence"]["min_iterations"]) and omega_rmse <= float(config["convergence"]["max_band_rms_change_THz"]):
-                converged = True
-                break
-        previous_bands = bands.copy()
+        free_energy_rows.append(
+            (iteration, read_vibrational_free_energy(iteration_dir, float(config["tdep"]["temperature_K"])))
+        )
+        write_free_energy_history(free_energy_rows, float(config["tdep"]["temperature_K"]), output)
+        if selected_for_dispersion_overlay(iteration, config):
+            selected_bands.append((iteration, bands))
+            plot_overlay(selected_bands, config, output / "phonon_dispersion_by_iteration.png")
 
     with (output / "run_summary.json").open("w") as handle:
-        json.dump({"converged": converged, "completed_tdep_iterations": len(all_bands), "supercell_atoms": len(unitcell) * multiplier}, handle, indent=2)
-    print(f"Finished. Converged: {converged}. Results: {output}")
+        json.dump(
+            {
+                "completed_tdep_iterations": len(free_energy_rows),
+                "dispersion_overlay_iterations": [iteration for iteration, _ in selected_bands],
+                "supercell_atoms": len(unitcell) * multiplier,
+            },
+            handle,
+            indent=2,
+        )
+    print(f"Finished {len(free_energy_rows)} requested TDEP iterations. Results: {output}")
 
 
 def main() -> None:

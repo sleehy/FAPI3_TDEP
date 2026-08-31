@@ -24,12 +24,11 @@ sampling:
   quantum: true                # canonical Bose-Einstein/zero-point sampling
   configurations_per_iteration: 200
 
-convergence:
-  min_iterations: 2
-  max_band_rms_change_THz: 0.05
-
 dispersion:
   points_per_segment: 81
+  # Only iterations 1, 4, 7, ... are superimposed in the dispersion plot.
+  overlay_start_iteration: 1
+  overlay_interval: 3
   # Tetragonal path: Gamma-X-M-Gamma-Z-R-A-Z
   qpoints:
     - [0.0, 0.0, 0.0]
@@ -41,6 +40,10 @@ dispersion:
     - [0.5, 0.5, 0.5]
     - [0.0, 0.0, 0.5]
   labels: ["Γ", "X", "M", "Γ", "Z", "R", "A", "Z"]
+
+free_energy:
+  # Brillouin-zone mesh for phonon F_vib at tdep.temperature_K.
+  qpoint_grid: [24, 24, 24]
 
 output:
   # Use a new directory whenever temperature, supercell, cutoff, or checkpoint changes.

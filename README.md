@@ -1,6 +1,6 @@
 # FAPbI3 TDEP finite-temperature phonons
 
-Configuration-driven stochastic TDEP phonon renormalization for tetragonal FAPbI3. The workflow uses the native TDEP executables for quantum canonical configuration generation, force-constant fitting, and phonon dispersions, with a fine-tuned SevenNet potential for energy and force evaluation.
+Configuration-driven stochastic TDEP phonon renormalization for tetragonal FAPbI3. The workflow uses the native TDEP executables for quantum canonical configuration generation, force-constant fitting, and phonon dispersions, with a fine-tuned SevenNet potential for energy and force evaluation. Each iteration pauses for manual screening of SevenNet MLP energies before FC2 fitting.
 
 ## Repository contents
 
@@ -57,9 +57,13 @@ python scripts/run_tdep.py --config tdep_tetragonal.yaml
 
 Set `tdep.temperature_K` in `tdep_tetragonal.yaml` before production if a temperature other than 300 K is required. If a calculation stops, rerun the same command: completed iterations are reused.
 
+At every incomplete iteration the script labels all `contcar_conf*` snapshots with SevenNet, saves `mlp_energy_histogram.png` and a descending-energy `mlp_energies.csv`, and waits for input. Inspect any high-energy snapshot named in the CSV with VESTA. If a snapshot is unphysical, overwrite that same `contcar_conf*` file with a replacement that has the identical supercell lattice, atom count, species, and atom ordering; then enter `r`. The script recalculates all MLP labels and recreates the histogram, so replacements can be reviewed repeatedly. Enter `c` only when the full set is acceptable; it then fits FC2 and advances to the next iteration. Enter `q` (or Ctrl-C) to stop safely before FC2 fitting.
+
 ## Outputs
 
-The configured output directory (`tdep_tetragonal_300K_rc2_6A/` by default) contains per-iteration TDEP inputs/outputs, SevenNet energies and forces, fitted FC2 (`outfile.forceconstant`), and phonon bands. `phonon_dispersion_by_iteration.png` overlays each iteration, while `omega_rmse_by_iteration.png` plots the RMS frequency change between consecutive iterations. `convergence.csv` records the same RMSE values.
+The configured output directory (`tdep_tetragonal_300K_rc2_6A/` by default) contains per-iteration TDEP inputs/outputs, SevenNet energies and forces, fitted FC2 (`outfile.forceconstant`), and phonon bands. Each iteration directory also contains `mlp_energy_histogram.png` and `mlp_energies.csv` for the manual configuration review. TDEP additionally writes `outfile.free_energy`, containing the phonon vibrational free energy F_vib, at `tdep.temperature_K` on the `free_energy.qpoint_grid` mesh. The root output directory collects these as `phonon_free_energy_by_iteration.png` and `phonon_free_energy_by_iteration.csv` (eV/atom).
+
+`phonon_dispersion_by_iteration.png` overlays only iterations 1, 4, 7, … by default (`dispersion.overlay_start_iteration: 1`, `dispersion.overlay_interval: 3`), while the free-energy plot includes every completed iteration. Use these two plots for manual convergence assessment. The run always completes the exact number of `tdep.iterations` requested; there is no automatic convergence stop.
 
 The script rejects FC2 cutoffs larger than the supercell's largest safe inscribed-sphere radius. It also refuses to reuse an output directory whose saved config differs from the active config. Change `output.directory` whenever the temperature, supercell, cutoff, or checkpoint changes. Generated outputs are intentionally ignored by Git; keep an archived result directory or a DOI-backed data repository for production data that should be shared.
 
