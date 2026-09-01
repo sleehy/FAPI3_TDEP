@@ -6,7 +6,7 @@ Configuration-driven stochastic TDEP phonon renormalization for tetragonal FAPbI
 
 - `tetragonal/CONTCAR_tet`: tetragonal FAPbI3 input structure.
 - `orthorhombic/CONTCAR`: companion orthorhombic structure.
-- `checkpoint_fine_tuned_al_round1.pth`: SevenNet model checkpoint used by the workflow.
+- `checkpoint_fine_tuned_al_round2.pth`: SevenNet model checkpoint used by the workflow.
 - `external/tdep`: pinned [official TDEP](https://github.com/tdep-developers/tdep) Git submodule.
 - `tdep_tetragonal.yaml`: all run parameters.
 - `scripts/run_tdep.py`: self-consistent TDEP workflow.
@@ -18,7 +18,7 @@ The supplied configuration runs at 300 K with the following settings:
 - 3 × 3 × 2 supercell (432 atoms for the supplied 24-atom tetragonal cell)
 - Quantum canonical statistics (`canonical_configuration --quantum`), including zero-point motion
 - 200 stochastic configurations per TDEP iteration
-- SevenNet energy and force calculations using `checkpoint_fine_tuned_al_round1.pth`
+- SevenNet energy and force calculations using `checkpoint_fine_tuned_al_round2.pth`
 - Native TDEP `extract_forceconstants` fitting and `phonon_dispersion_relations` on the tetragonal Γ–X–M–Γ–Z–R–A–Z path
 - 6.0 Å FC2 cutoff, safely below the 6.28 Å limit of the 3 × 3 × 2 supercell along its shortest direction
 
