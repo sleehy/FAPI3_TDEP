@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -121,6 +122,20 @@ def stage_tdep_inputs(structure_files: tuple[Path, Path], iteration_dir: Path, p
         shutil.copy2(prior_fc, iteration_dir / "infile.forceconstant")
 
 
+def canonical_configuration_command(config: dict, nconf: int, has_prior_fc: bool) -> list[str]:
+    """Build the TDEP command used for both the initial sample and replacements."""
+    command = [
+        tdep_executable(config, "canonical_configuration"),
+        "--temperature", str(config["tdep"]["temperature_K"]),
+        "--nconf", str(nconf),
+    ]
+    if bool(config["sampling"].get("quantum", False)):
+        command.append("--quantum")
+    if not has_prior_fc:
+        command += ["--maximum_frequency", str(config["tdep"]["initial_maximum_frequency_THz"])]
+    return command
+
+
 def generate_quantum_configurations(config: dict, iteration_dir: Path, has_prior_fc: bool) -> list[Path]:
     existing = sorted(iteration_dir.glob("contcar_conf*"))
     wanted = int(config["sampling"]["configurations_per_iteration"])
@@ -128,20 +143,64 @@ def generate_quantum_configurations(config: dict, iteration_dir: Path, has_prior
         return existing
     if existing:
         raise RuntimeError(f"Found {len(existing)} partial configurations in {iteration_dir}; expected {wanted}.")
-    command = [
-        tdep_executable(config, "canonical_configuration"),
-        "--temperature", str(config["tdep"]["temperature_K"]),
-        "--nconf", str(wanted),
-    ]
-    if bool(config["sampling"].get("quantum", False)):
-        command.append("--quantum")
-    if not has_prior_fc:
-        command += ["--maximum_frequency", str(config["tdep"]["initial_maximum_frequency_THz"])]
+    command = canonical_configuration_command(config, wanted, has_prior_fc)
     run_command(command, iteration_dir)
     generated = sorted(iteration_dir.glob("contcar_conf*"))
     if len(generated) != wanted:
         raise RuntimeError(f"TDEP generated {len(generated)} configurations, expected {wanted}.")
     return generated
+
+
+def resample_configurations(
+    config: dict,
+    iteration_dir: Path,
+    configuration_files: list[Path],
+    indices: list[int],
+    has_prior_fc: bool,
+) -> None:
+    """Replace selected snapshots with fresh draws from the current TDEP ensemble.
+
+    TDEP always numbers a new invocation from one, so sample it in a temporary
+    directory and move each fresh snapshot onto the user-selected filename.
+    The discarded snapshots are retained for review/audit purposes.
+    """
+    if not indices:
+        raise ValueError("Provide at least one configuration number after 'n'.")
+    if len(set(indices)) != len(indices):
+        raise ValueError("Each configuration number can be resampled only once per command.")
+    invalid = [index for index in indices if index < 1 or index > len(configuration_files)]
+    if invalid:
+        raise ValueError(
+            f"Configuration numbers must be between 1 and {len(configuration_files)}; got {invalid}."
+        )
+
+    targets = [configuration_files[index - 1] for index in indices]
+    required_inputs = ["infile.ucposcar", "infile.ssposcar"]
+    if has_prior_fc:
+        required_inputs.append("infile.forceconstant")
+    missing_inputs = [name for name in required_inputs if not (iteration_dir / name).is_file()]
+    if missing_inputs:
+        raise RuntimeError(f"Cannot resample configurations; missing TDEP input(s): {', '.join(missing_inputs)}")
+
+    with tempfile.TemporaryDirectory(prefix=".tdep_resample_", dir=iteration_dir) as temporary:
+        temporary_dir = Path(temporary)
+        for name in required_inputs:
+            shutil.copy2(iteration_dir / name, temporary_dir / name)
+        run_command(canonical_configuration_command(config, len(targets), has_prior_fc), temporary_dir)
+        replacements = sorted(temporary_dir.glob("contcar_conf*"))
+        if len(replacements) != len(targets):
+            raise RuntimeError(
+                f"TDEP generated {len(replacements)} replacement configurations, expected {len(targets)}."
+            )
+
+        archive_root = iteration_dir / "resampled_snapshots"
+        round_number = 1 + sum(path.is_dir() for path in archive_root.glob("round_*")) if archive_root.exists() else 1
+        archive_dir = archive_root / f"round_{round_number:03d}"
+        archive_dir.mkdir(parents=True)
+        for index, target, replacement in zip(indices, targets, replacements):
+            shutil.copy2(target, archive_dir / target.name)
+            shutil.move(str(replacement), target)
+            print(f"  Replaced configuration {index}: {target.name}", flush=True)
 
 
 def sevennet_calculator(config: dict) -> SevenNetCalculator:
@@ -211,8 +270,15 @@ def write_energy_review(iteration_dir: Path, configuration_files: list[Path], en
     return energy_csv, histogram
 
 
-def review_configurations(iteration: int, iteration_dir: Path, configuration_files: list[Path], calculator: SevenNetCalculator):
-    """Pause for user inspection; relabel after any manual snapshot replacements."""
+def review_configurations(
+    config: dict,
+    iteration: int,
+    iteration_dir: Path,
+    configuration_files: list[Path],
+    calculator: SevenNetCalculator,
+    has_prior_fc: bool,
+):
+    """Pause for inspection and allow manual or freshly sampled replacements."""
     while True:
         atoms_list, energies, forces = label_configurations(configuration_files, calculator)
         validate_configurations(atoms_list)
@@ -224,8 +290,9 @@ def review_configurations(iteration: int, iteration_dir: Path, configuration_fil
             "Inspect any configurations of concern in VESTA. To replace one, overwrite the "
             "corresponding contcar_conf* file while preserving its filename, cell, atom count, "
             "species, and atom order.\n"
-            "Enter [c] to accept these configurations and fit FC2, [r] after replacements to "
-            "recalculate energies and redraw the histogram, or [q] to stop: ",
+            "Enter [c] to accept these configurations and fit FC2; [n 17 42] to replace "
+            "configuration 17 and 42 with fresh TDEP samples; [r] after manual replacements "
+            "to recalculate energies and redraw the histogram; or [q] to stop: ",
             end="",
             flush=True,
         )
@@ -240,9 +307,17 @@ def review_configurations(iteration: int, iteration_dir: Path, configuration_fil
             return atoms_list, energies, forces
         if response in {"r", "review", "relabel"}:
             continue
+        tokens = response.replace(",", " ").split()
+        if tokens and tokens[0] in {"n", "new", "replace", "resample"}:
+            try:
+                indices = [int(token) for token in tokens[1:]]
+                resample_configurations(config, iteration_dir, configuration_files, indices, has_prior_fc)
+            except ValueError as error:
+                print(f"Invalid resampling command: {error}", flush=True)
+            continue
         if response in {"q", "quit", "stop"}:
             raise KeyboardInterrupt(f"Stopped during configuration review for iteration {iteration}.")
-        print("Please enter 'c', 'r', or 'q'.", flush=True)
+        print("Please enter 'c', 'n <number> [number ...]', 'r', or 'q'.", flush=True)
 
 
 def write_tdep_dataset(iteration_dir: Path, atoms_list, energies: np.ndarray, forces: np.ndarray, temperature: float) -> None:
@@ -425,7 +500,9 @@ def run(config: dict, config_file: Path, dry_run: bool) -> None:
         forceconstant = iteration_dir / "outfile.forceconstant"
         if not forceconstant.exists():
             configurations = generate_quantum_configurations(config, iteration_dir, has_prior_fc=previous_fc is not None)
-            atoms_list, energies, forces = review_configurations(iteration, iteration_dir, configurations, calculator)
+            atoms_list, energies, forces = review_configurations(
+                config, iteration, iteration_dir, configurations, calculator, has_prior_fc=previous_fc is not None
+            )
             write_tdep_dataset(iteration_dir, atoms_list, energies, forces, float(config["tdep"]["temperature_K"]))
             fit_force_constants(config, iteration_dir)
         else:
