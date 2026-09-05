@@ -57,7 +57,19 @@ python scripts/run_tdep.py --config tdep_tetragonal.yaml
 
 Set `tdep.temperature_K` in `tdep_tetragonal.yaml` before production if a temperature other than 300 K is required. If a calculation stops, rerun the same command: completed iterations are reused.
 
-At every incomplete iteration the script labels all `contcar_conf*` snapshots with SevenNet, saves `mlp_energy_histogram.png` and a descending-energy `mlp_energies.csv`, and waits for input. Inspect any high-energy snapshot named in the CSV with VESTA. If a snapshot is unphysical, enter `n` followed by its one-based configuration number, for example `n 17` or `n 17 42`. The script draws fresh snapshot(s) from the same TDEP ensemble, replaces only the selected files, keeps the displaced originals in `resampled_snapshots/`, then recalculates all MLP labels and recreates the histogram for another review. You can repeat this as needed. To supply a structure manually, overwrite the same `contcar_conf*` file while preserving its supercell lattice, atom count, species, and atom ordering, then enter `r`. Enter `c` only when the full set is acceptable; it then fits FC2 and advances to the next iteration. Enter `q` (or Ctrl-C) to stop safely before FC2 fitting.
+At every incomplete iteration, the script automatically screens every generated `contcar_conf*` for abnormal Pb–I geometry before the interactive review. It reports the one-based numbers of snapshots with a Pb–I contact shorter than `screening.pb_i_min_distance_A` or a reference Pb–I bond longer than `screening.pb_i_max_bond_distance_A`, and writes all measurements to `pb_i_distance_screening.csv`. The Pb–I reference bonds are identified once from that iteration's `infile.ssposcar`; close contacts are nevertheless checked against all Pb/I pairs so a new collapsed contact is detected. The default limits (2.5–3.8 Å) are configurable in `tdep_tetragonal.yaml` and are warnings only: inspect the listed snapshots, then use `n`, `r`, `c`, or `q` as appropriate. The script also labels all snapshots with SevenNet, saves `mlp_energy_histogram.png` and a descending-energy `mlp_energies.csv`, and waits for input. Inspect any high-energy snapshot named in the CSV with VESTA. For a molecular-geometry check, enter `d` followed by one or more one-based configuration numbers (for example, `d 17` or `d 17 42`). This writes `<contcar_conf*>_bond_distance_histogram.png` and CSV files containing the N–H and C–H bond lengths. The pairs are identified once from that iteration's `infile.ssposcar` using element-specific covalent-radius cutoffs, then the same atom-index pairs are measured in the selected snapshot under periodic minimum-image distances. Thus thermal displacements cannot cause a neighbouring H atom to be mistaken for a new bond.
+
+If a snapshot is unphysical, enter `n` followed by its one-based configuration number, for example `n 17` or `n 17 42`. The script draws fresh snapshot(s) from the same TDEP ensemble, replaces only the selected files, keeps the displaced originals in `resampled_snapshots/`, then recalculates all MLP labels and recreates the histogram for another review. You can repeat this as needed. To supply a structure manually, overwrite the same `contcar_conf*` file while preserving its supercell lattice, atom count, species, and atom ordering, then enter `r`. Enter `c` only when the full set is acceptable; it then fits FC2 and advances to the next iteration. Enter `q` (or Ctrl-C) to stop safely before FC2 fitting.
+
+The distance diagnostic is also available independently after a run or for any compatible POSCAR pair:
+
+```bash
+python scripts/plot_bond_distances.py \
+  --reference tdep_tetragonal_300K_rc2_6A/iteration_01/infile.ssposcar \
+  --structure tdep_tetragonal_300K_rc2_6A/iteration_01/contcar_conf17
+```
+
+When no `--reference` is supplied, the target structure itself is used to define the bond pairs. Use `--cutoff-scale` only if a nonstandard geometry needs a different covalent-radius multiplier (the default is 1.25).
 
 ## Outputs
 

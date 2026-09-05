@@ -11,6 +11,7 @@ TDEP file conversion, phonon-property plots, and interactive snapshot review.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -28,6 +29,8 @@ import numpy as np
 import yaml
 from ase.io import read, write
 from sevenn.calculator import SevenNetCalculator
+
+from plot_bond_distances import write_bond_distance_histogram
 
 
 def load_config(path: Path) -> dict:
@@ -61,6 +64,12 @@ def config_snapshot_matches(snapshot: Path, config_file: Path) -> bool:
     previous_free_energy = previous.setdefault("free_energy", {})
     if isinstance(previous_free_energy, dict):
         previous_free_energy.setdefault("qpoint_grid", [24, 24, 24])
+    for settings in (previous, current):
+        screening = settings.setdefault("screening", {})
+        if isinstance(screening, dict):
+            screening.setdefault("pb_i_reference_cutoff_A", 4.0)
+            screening.setdefault("pb_i_min_distance_A", 2.5)
+            screening.setdefault("pb_i_max_bond_distance_A", 3.8)
     return previous == current
 
 
@@ -270,6 +279,147 @@ def write_energy_review(iteration_dir: Path, configuration_files: list[Path], en
     return energy_csv, histogram
 
 
+def pb_i_screening_settings(config: dict) -> tuple[float, float, float]:
+    """Read and validate Pb-I geometry-screening limits in Angstrom."""
+    settings = config.get("screening", {})
+    if not isinstance(settings, dict):
+        raise ValueError("screening must be a YAML mapping.")
+    reference_cutoff = float(settings.get("pb_i_reference_cutoff_A", 4.0))
+    minimum_distance = float(settings.get("pb_i_min_distance_A", 2.5))
+    maximum_bond_distance = float(settings.get("pb_i_max_bond_distance_A", 3.8))
+    if not 0.0 < minimum_distance < maximum_bond_distance <= reference_cutoff:
+        raise ValueError(
+            "Pb-I screening limits must satisfy 0 < pb_i_min_distance_A < "
+            "pb_i_max_bond_distance_A <= pb_i_reference_cutoff_A."
+        )
+    return reference_cutoff, minimum_distance, maximum_bond_distance
+
+
+def find_pb_i_reference_bonds(reference_atoms, cutoff: float) -> list[tuple[int, int]]:
+    """Select Pb-I bonds once from the undistorted supercell under PBC."""
+    symbols = np.asarray(reference_atoms.get_chemical_symbols())
+    lead_indices = np.flatnonzero(symbols == "Pb")
+    iodine_indices = np.flatnonzero(symbols == "I")
+    if not len(lead_indices) or not len(iodine_indices):
+        raise ValueError("Pb-I screening requires both Pb and I atoms in infile.ssposcar.")
+
+    bonds = []
+    for lead_index in lead_indices:
+        distances = reference_atoms.get_distances(int(lead_index), iodine_indices, mic=True)
+        bonds.extend(
+            (int(lead_index), int(iodine_index))
+            for iodine_index, distance in zip(iodine_indices, distances)
+            if distance <= cutoff
+        )
+    if not bonds:
+        raise ValueError(
+            f"No Pb-I reference bonds were found within pb_i_reference_cutoff_A={cutoff:.3f} Å."
+        )
+    return bonds
+
+
+def write_pb_i_distance_screening(
+    config: dict, iteration_dir: Path, configuration_files: list[Path]
+) -> list[int]:
+    """Flag snapshots with collapsed Pb-I contacts or stretched reference Pb-I bonds.
+
+    The reference topology avoids interpreting every distant Pb/I combination as
+    a bond.  Conversely, the shortest distance is evaluated over *all* Pb-I
+    combinations so a new, unphysical close contact cannot be missed.
+    """
+    reference_cutoff, minimum_distance, maximum_bond_distance = pb_i_screening_settings(config)
+    reference = iteration_dir / "infile.ssposcar"
+    if not reference.is_file():
+        raise RuntimeError(f"Cannot screen Pb-I distances; missing reference supercell: {reference}")
+    reference_atoms = read(reference, format="vasp")
+    reference_bonds = find_pb_i_reference_bonds(reference_atoms, reference_cutoff)
+    symbols = np.asarray(reference_atoms.get_chemical_symbols())
+    lead_indices = np.flatnonzero(symbols == "Pb")
+    iodine_indices = np.flatnonzero(symbols == "I")
+
+    csv_file = iteration_dir / "pb_i_distance_screening.csv"
+    flagged: list[int] = []
+    with csv_file.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "configuration",
+                "minimum_all_pb_i_distance_A",
+                "maximum_reference_pb_i_distance_A",
+                "short_pb_i_contacts",
+                "long_reference_pb_i_bonds",
+                "status",
+            ]
+        )
+        for configuration_number, configuration in enumerate(configuration_files, start=1):
+            atoms = read(configuration, format="vasp")
+            if atoms.get_chemical_symbols() != reference_atoms.get_chemical_symbols():
+                raise ValueError(
+                    f"Configuration {configuration_number} has a different atom count, species, or atom order. "
+                    "Pb-I screening requires the reference supercell atom order."
+                )
+            all_pb_i_distances = np.concatenate(
+                [atoms.get_distances(int(lead_index), iodine_indices, mic=True) for lead_index in lead_indices]
+            )
+            reference_distances = np.asarray(
+                [atoms.get_distance(lead_index, iodine_index, mic=True) for lead_index, iodine_index in reference_bonds]
+            )
+            short_contacts = int(np.count_nonzero(all_pb_i_distances < minimum_distance))
+            long_bonds = int(np.count_nonzero(reference_distances > maximum_bond_distance))
+            status = "FLAGGED" if short_contacts or long_bonds else "ok"
+            if status == "FLAGGED":
+                flagged.append(configuration_number)
+            writer.writerow(
+                [
+                    configuration.name,
+                    f"{all_pb_i_distances.min():.10f}",
+                    f"{reference_distances.max():.10f}",
+                    short_contacts,
+                    long_bonds,
+                    status,
+                ]
+            )
+
+    print(
+        f"  Pb-I geometry screen: {len(flagged)}/{len(configuration_files)} flagged "
+        f"(short < {minimum_distance:.2f} Å; reference bond > {maximum_bond_distance:.2f} Å).\n"
+        f"  Details: {csv_file}",
+        flush=True,
+    )
+    if flagged:
+        print("  Potentially abnormal configuration(s): " + ", ".join(map(str, flagged)), flush=True)
+    return flagged
+
+
+def write_bond_distance_review(iteration_dir: Path, configuration_files: list[Path], indices: list[int]) -> None:
+    """Plot fixed-reference N-H/C-H distributions for selected snapshots."""
+    if not indices:
+        raise ValueError("Provide at least one configuration number after 'd'.")
+    if len(set(indices)) != len(indices):
+        raise ValueError("Each configuration number can be plotted only once per command.")
+    invalid = [index for index in indices if index < 1 or index > len(configuration_files)]
+    if invalid:
+        raise ValueError(
+            f"Configuration numbers must be between 1 and {len(configuration_files)}; got {invalid}."
+        )
+    reference = iteration_dir / "infile.ssposcar"
+    if not reference.is_file():
+        raise RuntimeError(f"Cannot plot bond distances; missing reference supercell: {reference}")
+    for index in indices:
+        configuration = configuration_files[index - 1]
+        histogram, csv_file, distances = write_bond_distance_histogram(
+            reference=reference,
+            structure=configuration,
+            output=iteration_dir / f"{configuration.name}_bond_distance_histogram.png",
+        )
+        summary = "; ".join(
+            f"{label}: n={len(values)}, mean={values.mean():.4f} Å, "
+            f"range={values.min():.4f}–{values.max():.4f} Å"
+            for label, values in distances.items()
+        )
+        print(f"  Configuration {index} bond histogram: {histogram}\n  Bond distances: {csv_file}\n  {summary}", flush=True)
+
+
 def review_configurations(
     config: dict,
     iteration: int,
@@ -280,6 +430,7 @@ def review_configurations(
 ):
     """Pause for inspection and allow manual or freshly sampled replacements."""
     while True:
+        write_pb_i_distance_screening(config, iteration_dir, configuration_files)
         atoms_list, energies, forces = label_configurations(configuration_files, calculator)
         validate_configurations(atoms_list)
         energy_csv, histogram = write_energy_review(iteration_dir, configuration_files, energies)
@@ -290,7 +441,8 @@ def review_configurations(
             "Inspect any configurations of concern in VESTA. To replace one, overwrite the "
             "corresponding contcar_conf* file while preserving its filename, cell, atom count, "
             "species, and atom order.\n"
-            "Enter [c] to accept these configurations and fit FC2; [n 17 42] to replace "
+            "Enter [d 17] to write N-H/C-H distance histograms for configuration 17; "
+            "[c] to accept these configurations and fit FC2; [n 17 42] to replace "
             "configuration 17 and 42 with fresh TDEP samples; [r] after manual replacements "
             "to recalculate energies and redraw the histogram; or [q] to stop: ",
             end="",
@@ -308,6 +460,13 @@ def review_configurations(
         if response in {"r", "review", "relabel"}:
             continue
         tokens = response.replace(",", " ").split()
+        if tokens and tokens[0] in {"d", "distance", "distances", "bond", "bonds"}:
+            try:
+                indices = [int(token) for token in tokens[1:]]
+                write_bond_distance_review(iteration_dir, configuration_files, indices)
+            except ValueError as error:
+                print(f"Invalid distance-plot command: {error}", flush=True)
+            continue
         if tokens and tokens[0] in {"n", "new", "replace", "resample"}:
             try:
                 indices = [int(token) for token in tokens[1:]]
@@ -317,7 +476,7 @@ def review_configurations(
             continue
         if response in {"q", "quit", "stop"}:
             raise KeyboardInterrupt(f"Stopped during configuration review for iteration {iteration}.")
-        print("Please enter 'c', 'n <number> [number ...]', 'r', or 'q'.", flush=True)
+        print("Please enter 'd <number> [number ...]', 'c', 'n <number> [number ...]', 'r', or 'q'.", flush=True)
 
 
 def write_tdep_dataset(iteration_dir: Path, atoms_list, energies: np.ndarray, forces: np.ndarray, temperature: float) -> None:

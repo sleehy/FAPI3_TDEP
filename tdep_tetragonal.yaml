@@ -24,6 +24,14 @@ sampling:
   quantum: true                # canonical Bose-Einstein/zero-point sampling
   configurations_per_iteration: 200
 
+screening:
+  # Flag suspicious snapshots before the interactive n/r/q/c review. Pb-I bonds
+  # are identified once from infile.ssposcar under PBC, while short contacts are
+  # checked against every Pb-I pair in each generated configuration.
+  pb_i_reference_cutoff_A: 4.0
+  pb_i_min_distance_A: 2.5
+  pb_i_max_bond_distance_A: 3.8
+
 dispersion:
   points_per_segment: 81
   # Only iterations 1, 4, 7, ... are superimposed in the dispersion plot.
