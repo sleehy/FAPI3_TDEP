@@ -43,7 +43,7 @@ def load_config(path: Path) -> dict:
 
 
 def config_snapshot_matches(snapshot: Path, config_file: Path) -> bool:
-    """Allow resuming runs made before default post-processing settings were added."""
+    """Allow compatible resume-only configuration changes."""
     snapshot_text = snapshot.read_text()
     config_text = config_file.read_text()
     if snapshot_text == config_text:
@@ -70,6 +70,20 @@ def config_snapshot_matches(snapshot: Path, config_file: Path) -> bool:
             screening.setdefault("pb_i_reference_cutoff_A", 4.0)
             screening.setdefault("pb_i_min_distance_A", 2.5)
             screening.setdefault("pb_i_max_bond_distance_A", 3.8)
+    previous_tdep = previous.get("tdep")
+    current_tdep = current.get("tdep")
+    if not isinstance(previous_tdep, dict) or not isinstance(current_tdep, dict):
+        return False
+    try:
+        previous_iterations = int(previous_tdep["iterations"])
+        current_iterations = int(current_tdep["iterations"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    # More self-consistency iterations continue the same calculation.  Any
+    # decrease or other TDEP setting change still requires a fresh output dir.
+    if current_iterations < previous_iterations:
+        return False
+    previous_tdep["iterations"] = current_iterations
     return previous == current
 
 
@@ -145,8 +159,17 @@ def canonical_configuration_command(config: dict, nconf: int, has_prior_fc: bool
     return command
 
 
+def configuration_paths(directory: Path) -> list[Path]:
+    """Return only TDEP's numbered contcar_conf files, excluding plot/CSV sidecars."""
+    return sorted(
+        path
+        for path in directory.glob("contcar_conf*")
+        if path.is_file() and path.name.removeprefix("contcar_conf").isdigit()
+    )
+
+
 def generate_quantum_configurations(config: dict, iteration_dir: Path, has_prior_fc: bool) -> list[Path]:
-    existing = sorted(iteration_dir.glob("contcar_conf*"))
+    existing = configuration_paths(iteration_dir)
     wanted = int(config["sampling"]["configurations_per_iteration"])
     if len(existing) == wanted:
         return existing
@@ -154,7 +177,7 @@ def generate_quantum_configurations(config: dict, iteration_dir: Path, has_prior
         raise RuntimeError(f"Found {len(existing)} partial configurations in {iteration_dir}; expected {wanted}.")
     command = canonical_configuration_command(config, wanted, has_prior_fc)
     run_command(command, iteration_dir)
-    generated = sorted(iteration_dir.glob("contcar_conf*"))
+    generated = configuration_paths(iteration_dir)
     if len(generated) != wanted:
         raise RuntimeError(f"TDEP generated {len(generated)} configurations, expected {wanted}.")
     return generated
@@ -166,7 +189,7 @@ def resample_configurations(
     configuration_files: list[Path],
     indices: list[int],
     has_prior_fc: bool,
-) -> None:
+) -> list[int]:
     """Replace selected snapshots with fresh draws from the current TDEP ensemble.
 
     TDEP always numbers a new invocation from one, so sample it in a temporary
@@ -196,7 +219,7 @@ def resample_configurations(
         for name in required_inputs:
             shutil.copy2(iteration_dir / name, temporary_dir / name)
         run_command(canonical_configuration_command(config, len(targets), has_prior_fc), temporary_dir)
-        replacements = sorted(temporary_dir.glob("contcar_conf*"))
+        replacements = configuration_paths(temporary_dir)
         if len(replacements) != len(targets):
             raise RuntimeError(
                 f"TDEP generated {len(replacements)} replacement configurations, expected {len(targets)}."
@@ -210,6 +233,7 @@ def resample_configurations(
             shutil.copy2(target, archive_dir / target.name)
             shutil.move(str(replacement), target)
             print(f"  Replaced configuration {index}: {target.name}", flush=True)
+    return indices
 
 
 def sevennet_calculator(config: dict) -> SevenNetCalculator:
@@ -219,18 +243,46 @@ def sevennet_calculator(config: dict) -> SevenNetCalculator:
     return SevenNetCalculator(str(checkpoint), device=config["calculation"].get("device", "auto"))
 
 
+def label_configuration(filename: Path, calculator: SevenNetCalculator):
+    """Evaluate one structure with SevenNet and return its atoms, energy, and forces."""
+    atoms = read(filename, format="vasp")
+    atoms.calc = calculator
+    return atoms, atoms.get_potential_energy(), atoms.get_forces()
+
+
 def label_configurations(configuration_files: list[Path], calculator: SevenNetCalculator):
     atoms_list, energies, forces = [], [], []
     total = len(configuration_files)
     for index, filename in enumerate(configuration_files, start=1):
-        atoms = read(filename, format="vasp")
-        atoms.calc = calculator
-        energies.append(atoms.get_potential_energy())
-        forces.append(atoms.get_forces())
+        atoms, energy, force = label_configuration(filename, calculator)
+        energies.append(energy)
+        forces.append(force)
         atoms_list.append(atoms)
         if index == 1 or index % 10 == 0 or index == total:
             print(f"  SevenNet: {index}/{total}", flush=True)
     return atoms_list, np.asarray(energies), np.asarray(forces)
+
+
+def relabel_replacements(
+    configuration_files: list[Path],
+    replaced_indices: list[int],
+    calculator: SevenNetCalculator,
+    atoms_list,
+    energies: np.ndarray,
+    forces: np.ndarray,
+) -> None:
+    """Update only resampled snapshots while retaining labels for every other one."""
+    for position, configuration_index in enumerate(replaced_indices, start=1):
+        array_index = configuration_index - 1
+        atoms, energy, force = label_configuration(configuration_files[array_index], calculator)
+        atoms_list[array_index] = atoms
+        energies[array_index] = energy
+        forces[array_index] = force
+        print(
+            f"  SevenNet replacement: {position}/{len(replaced_indices)} "
+            f"(configuration {configuration_index})",
+            flush=True,
+        )
 
 
 def validate_configurations(atoms_list) -> None:
@@ -429,9 +481,23 @@ def review_configurations(
     has_prior_fc: bool,
 ):
     """Pause for inspection and allow manual or freshly sampled replacements."""
+    review_prompt = (
+        "Enter [d 17] to write N-H/C-H distance histograms for configuration 17; "
+        "[c] to accept these configurations and fit FC2; [n 17 42] to replace "
+        "configuration 17 and 42 with fresh TDEP samples; [r] after manual replacements "
+        "to recalculate energies and redraw the histogram; or [q] to stop: "
+    )
+    atoms_list = energies = forces = None
+    replaced_indices: list[int] | None = None
     while True:
         write_pb_i_distance_screening(config, iteration_dir, configuration_files)
-        atoms_list, energies, forces = label_configurations(configuration_files, calculator)
+        if atoms_list is None:
+            atoms_list, energies, forces = label_configurations(configuration_files, calculator)
+        elif replaced_indices is not None:
+            relabel_replacements(
+                configuration_files, replaced_indices, calculator, atoms_list, energies, forces
+            )
+        replaced_indices = None
         validate_configurations(atoms_list)
         energy_csv, histogram = write_energy_review(iteration_dir, configuration_files, energies)
         print(
@@ -441,42 +507,51 @@ def review_configurations(
             "Inspect any configurations of concern in VESTA. To replace one, overwrite the "
             "corresponding contcar_conf* file while preserving its filename, cell, atom count, "
             "species, and atom order.\n"
-            "Enter [d 17] to write N-H/C-H distance histograms for configuration 17; "
-            "[c] to accept these configurations and fit FC2; [n 17 42] to replace "
-            "configuration 17 and 42 with fresh TDEP samples; [r] after manual replacements "
-            "to recalculate energies and redraw the histogram; or [q] to stop: ",
+            + review_prompt,
             end="",
             flush=True,
         )
-        try:
-            response = input().strip().lower()
-        except EOFError as error:
-            raise RuntimeError(
-                "Interactive configuration review requires a terminal. Run this command in a "
-                "terminal and accept each iteration with 'c'."
-            ) from error
-        if response in {"c", "continue"}:
-            return atoms_list, energies, forces
-        if response in {"r", "review", "relabel"}:
-            continue
-        tokens = response.replace(",", " ").split()
-        if tokens and tokens[0] in {"d", "distance", "distances", "bond", "bonds"}:
+        while True:
             try:
-                indices = [int(token) for token in tokens[1:]]
-                write_bond_distance_review(iteration_dir, configuration_files, indices)
-            except ValueError as error:
-                print(f"Invalid distance-plot command: {error}", flush=True)
-            continue
-        if tokens and tokens[0] in {"n", "new", "replace", "resample"}:
-            try:
-                indices = [int(token) for token in tokens[1:]]
-                resample_configurations(config, iteration_dir, configuration_files, indices, has_prior_fc)
-            except ValueError as error:
-                print(f"Invalid resampling command: {error}", flush=True)
-            continue
-        if response in {"q", "quit", "stop"}:
-            raise KeyboardInterrupt(f"Stopped during configuration review for iteration {iteration}.")
-        print("Please enter 'd <number> [number ...]', 'c', 'n <number> [number ...]', 'r', or 'q'.", flush=True)
+                response = input().strip().lower()
+            except EOFError as error:
+                raise RuntimeError(
+                    "Interactive configuration review requires a terminal. Run this command in a "
+                    "terminal and accept each iteration with 'c'."
+                ) from error
+            if response in {"c", "continue"}:
+                return atoms_list, energies, forces
+            if response in {"r", "review", "relabel"}:
+                atoms_list = energies = forces = None
+                break
+            tokens = response.replace(",", " ").split()
+            if tokens and tokens[0] in {"d", "distance", "distances", "bond", "bonds"}:
+                try:
+                    indices = [int(token) for token in tokens[1:]]
+                    write_bond_distance_review(iteration_dir, configuration_files, indices)
+                except ValueError as error:
+                    print(f"Invalid distance-plot command: {error}", flush=True)
+                print(review_prompt, end="", flush=True)
+                continue
+            if tokens and tokens[0] in {"n", "new", "replace", "resample"}:
+                try:
+                    indices = [int(token) for token in tokens[1:]]
+                    replaced_indices = resample_configurations(
+                        config, iteration_dir, configuration_files, indices, has_prior_fc
+                    )
+                except ValueError as error:
+                    print(f"Invalid resampling command: {error}", flush=True)
+                    print(review_prompt, end="", flush=True)
+                    continue
+                break
+            if response in {"q", "quit", "stop"}:
+                raise KeyboardInterrupt(f"Stopped during configuration review for iteration {iteration}.")
+            print(
+                "Please enter 'd <number> [number ...]', 'c', 'n <number> [number ...]', 'r', or 'q'.\n"
+                + review_prompt,
+                end="",
+                flush=True,
+            )
 
 
 def write_tdep_dataset(iteration_dir: Path, atoms_list, energies: np.ndarray, forces: np.ndarray, temperature: float) -> None:
@@ -643,6 +718,10 @@ def run(config: dict, config_file: Path, dry_run: bool) -> None:
             "or archive the existing output before running."
         )
     if not config_snapshot.exists():
+        shutil.copy2(config_file, config_snapshot)
+    elif config_snapshot.read_text() != config_file.read_text():
+        # Record an approved resume-only change (such as more iterations) so a
+        # later accidental reduction is still rejected.
         shutil.copy2(config_file, config_snapshot)
     structure_files = write_tdep_unitcell(config, output / "structure")
     validate_cutoff(config, structure_files[1])

@@ -4,15 +4,15 @@ input:
   structure: tetragonal/CONTCAR_tet
 
 calculation:
-  checkpoint: checkpoint_fine_tuned_al_round2.pth
+  checkpoint: checkpoint_fine_tuned_al_round3.pth
   device: auto                 # e.g. cuda, cuda:0, or cpu
 
 tdep:
   # Official tdep-developers/tdep submodule, built by scripts/setup_tdep.sh.
   bin_dir: external/tdep/bin
-  temperature_K: 300.0         # finite-temperature target; change as needed
+  temperature_K: 200.0         # finite-temperature target; change as needed
   supercell_matrix: [3, 3, 2]  # 24 atoms x 3 x 3 x 2 = 432 atoms
-  iterations: 5
+  iterations: 16
   # Used only in iteration 1 to construct TDEP's initial fake FC2. Subsequent
   # samplings use the FC2 fitted by extract_forceconstants in the last iteration.
   initial_maximum_frequency_THz: 100.0
@@ -55,4 +55,4 @@ free_energy:
 
 output:
   # Use a new directory whenever temperature, supercell, cutoff, or checkpoint changes.
-  directory: tdep_tetragonal_300K_rc2_6A
+  directory: tdep_tetragonal_200K_rc2_6A
