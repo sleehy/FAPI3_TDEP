@@ -89,6 +89,106 @@ By default this uses the same iteration selection as `phonon_dispersion_by_itera
 
 The script rejects FC2 cutoffs larger than the supercell's largest safe inscribed-sphere radius. It also refuses to reuse an output directory whose saved config differs from the active config. Change `output.directory` whenever the temperature, supercell, cutoff, or checkpoint changes. Generated outputs are intentionally ignored by Git; keep an archived result directory or a DOI-backed data repository for production data that should be shared.
 
+## Split Colab/local workflow (GitHub handoff)
+
+When Colab has the GPU for SevenNet but runs out of memory in
+`extract_forceconstants`, retain the full `tdep_tetragonal_*/` result directory
+on each machine and exchange only one fitting handoff per iteration through
+GitHub. The handoff contains exactly TDEP's six FC2 inputs
+(`infile.ucposcar`, `infile.ssposcar`, `infile.meta`, `infile.stat`,
+`infile.positions`, and `infile.forces`), a checksum manifest, and—on the way
+back—the fitted `outfile.forceconstant`. It excludes all POSCAR snapshots,
+SevenNet `.npy` labels, plots, and other TDEP outputs.
+
+On **Colab**, clone the repository, install the normal requirements and TDEP
+tools needed for sampling, then label and review one iteration:
+
+```bash
+python scripts/run_tdep.py --config tdep_tetragonal.yaml \
+  --stop-after-labeling --handoff-dir handoff
+git add handoff/iteration_01
+git commit -m "handoff iteration 01 labels"
+git push
+```
+
+Use the explicit `git add` path rather than `git add .`. On the **local**
+machine, pull that commit and fit directly in the handoff directory:
+
+```bash
+git pull
+python scripts/tdep_handoff.py fit \
+  --config tdep_tetragonal.yaml --handoff-dir handoff/iteration_01
+git add handoff/iteration_01/outfile.forceconstant handoff/iteration_01/manifest.json
+git commit -m "fit iteration 01 FC2 locally"
+git push
+```
+
+Back on **Colab**, pull, import only the fitted FC2 into its ignored run
+directory, and run the same label/export command again. The FC2 is reused and
+the next incomplete iteration is written as `handoff/iteration_02`:
+
+```bash
+git pull
+python scripts/tdep_handoff.py import-fc \
+  --config tdep_tetragonal.yaml --handoff-dir handoff/iteration_01
+python scripts/run_tdep.py --config tdep_tetragonal.yaml \
+  --stop-after-labeling --handoff-dir handoff
+```
+
+Repeat this three-step cycle. The manifest validates SHA-256 checksums for all
+transferred inputs and refuses an FC2 fitted with a different YAML, stale or
+corrupt files, or overwriting a different local FC2. Add `--dry-run` to the
+local `fit` command to print the TDEP command without allocating memory.
+
+## Split IFC3 fitting after FC2 convergence
+
+Use the same split after selecting a converged final FC2. `fit_tdep_ifc3.py`
+generates and reviews its **new** IFC3 configurations on Colab, then exits
+before the memory-intensive joint IFC2/IFC3 fit:
+
+```bash
+python scripts/fit_tdep_ifc3.py \
+  --result-dir tdep_tetragonal_200K_rc2_6A/iteration_16 \
+  --config tdep_tetragonal.yaml \
+  --thirdorder-cutoff 4.0 \
+  --configurations 300 \
+  --output-dir tdep_tetragonal_200K_rc2_6A/iteration_16/ifc3_rc3_4A_nconf_300 \
+  --stop-after-labeling \
+  --handoff-dir handoff/ifc3_rc3_4A_nconf_300
+git add handoff/ifc3_rc3_4A_nconf_300
+git commit -m "handoff reviewed IFC3 labels"
+git push
+```
+
+On the **local** machine, pull and run the joint fit. Its second-order cutoff,
+third-order cutoff, temperature, and stride come from the checksum-protected
+handoff manifest, not from manually repeated options:
+
+```bash
+git pull
+python scripts/tdep_handoff.py fit-ifc3 \
+  --config tdep_tetragonal.yaml \
+  --handoff-dir handoff/ifc3_rc3_4A_nconf_300
+git add handoff/ifc3_rc3_4A_nconf_300/outfile.forceconstant_thirdorder \
+  handoff/ifc3_rc3_4A_nconf_300/manifest.json
+git commit -m "fit IFC3 locally"
+git push
+```
+
+Finally on **Colab**, pull and return only `outfile.forceconstant_thirdorder`
+to the same ignored, reviewed IFC3 work directory:
+
+```bash
+git pull
+python scripts/tdep_handoff.py import-ifc3 \
+  --config tdep_tetragonal.yaml \
+  --handoff-dir handoff/ifc3_rc3_4A_nconf_300 \
+  --output-dir tdep_tetragonal_200K_rc2_6A/iteration_16/ifc3_rc3_4A_nconf_300
+```
+
+The normal one-machine `fit_tdep_ifc3.py` invocation remains available when
+GPU and memory are both local.
+
 ## Plot a TDEP band structure and PDOS
 
 After a TDEP iteration has fitted `outfile.forceconstant`, create a combined

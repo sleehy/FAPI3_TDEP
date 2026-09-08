@@ -256,6 +256,16 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         help="IFC3 sampling/fitting directory (default: <result-dir>/ifc3_rc3_<cutoff>A_nconf_<count>).",
     )
+    parser.add_argument(
+        "--stop-after-labeling",
+        action="store_true",
+        help="Export reviewed IFC3 fitting inputs for local extract_forceconstants instead of fitting on this machine.",
+    )
+    parser.add_argument(
+        "--handoff-dir",
+        type=Path,
+        help="Exact Git-tracked IFC3 handoff directory; required with --stop-after-labeling.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate and print TDEP commands without generating configurations or fitting.")
     return parser.parse_args()
 
@@ -270,6 +280,10 @@ def main() -> None:
         raise ValueError("--configurations must be a positive integer.")
     if args.stride < 1:
         raise ValueError("--stride must be a positive integer.")
+    if args.stop_after_labeling and args.handoff_dir is None:
+        raise ValueError("--stop-after-labeling requires --handoff-dir.")
+    if args.handoff_dir is not None and not args.stop_after_labeling:
+        raise ValueError("--handoff-dir is only valid with --stop-after-labeling.")
 
     source_dir = args.result_dir.resolve()
     final_ifc2 = validate_final_ifc2(source_dir)
@@ -342,6 +356,33 @@ def main() -> None:
     if checked_configurations != n_configurations:
         raise RuntimeError(f"Reviewed {checked_configurations} configurations; expected {n_configurations}.")
     validate_configuration_review(output_dir, n_atoms, checked_configurations)
+    if args.stop_after_labeling:
+        # The IFC3 handoff has the same six native fitting inputs as FC2, but
+        # also records the exact joint IFC2/IFC3 fit arguments for the local
+        # machine. Snapshots and MLP arrays remain only in the Colab work dir.
+        from tdep_handoff import export_fitting_inputs
+
+        exported = export_fitting_inputs(
+            output_dir,
+            args.handoff_dir.resolve(),
+            sampling_config_file,
+            output_dir,
+            iteration_number,
+            kind="ifc3",
+            fit_arguments={
+                "secondorder_cutoff_A": secondorder_cutoff,
+                "thirdorder_cutoff_A": args.thirdorder_cutoff,
+                "temperature_K": temperature,
+                "stride": args.stride,
+            },
+        )
+        print(
+            f"Reviewed IFC3 labels are ready; exported the minimal handoff to {exported}.\n"
+            "Commit/push it, fit with `tdep_handoff.py fit-ifc3` locally, then import its IFC3 "
+            "with `tdep_handoff.py import-ifc3` on Colab.",
+            flush=True,
+        )
+        return
     subprocess.run(fit_command, cwd=output_dir, check=True)
     if not thirdorder_output.is_file():
         raise RuntimeError("TDEP completed without writing outfile.forceconstant_thirdorder.")

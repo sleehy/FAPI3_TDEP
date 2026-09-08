@@ -1,0 +1,14 @@
+# This directory is the only GitHub transport area. Keep a handoff minimal.
+*
+!.gitignore
+!README.md
+!*/
+!*/manifest.json
+!*/infile.ucposcar
+!*/infile.ssposcar
+!*/infile.meta
+!*/infile.stat
+!*/infile.positions
+!*/infile.forces
+!*/outfile.forceconstant
+!*/outfile.forceconstant_thirdorder

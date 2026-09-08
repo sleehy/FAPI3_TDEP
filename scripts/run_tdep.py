@@ -699,7 +699,17 @@ def write_free_energy_history(rows: list[tuple[int, float]], temperature: float,
     plt.close(fig)
 
 
-def run(config: dict, config_file: Path, dry_run: bool) -> None:
+def run(
+    config: dict,
+    config_file: Path,
+    dry_run: bool,
+    stop_after_labeling: bool = False,
+    handoff_dir: Path | None = None,
+) -> None:
+    if stop_after_labeling and handoff_dir is None:
+        raise ValueError("--stop-after-labeling requires --handoff-dir.")
+    if handoff_dir is not None and not stop_after_labeling:
+        raise ValueError("--handoff-dir is only valid with --stop-after-labeling.")
     output = config_path(config, config["output"]["directory"])
     unitcell = read(config_path(config, config["input"]["structure"]), format="vasp")
     multiplier = int(np.prod(config["tdep"]["supercell_matrix"]))
@@ -742,6 +752,20 @@ def run(config: dict, config_file: Path, dry_run: bool) -> None:
                 config, iteration, iteration_dir, configurations, calculator, has_prior_fc=previous_fc is not None
             )
             write_tdep_dataset(iteration_dir, atoms_list, energies, forces, float(config["tdep"]["temperature_K"]))
+            if stop_after_labeling:
+                # The handoff is intentionally imported only for this optional
+                # split-machine path; the normal workflow remains unchanged.
+                from tdep_handoff import export_fitting_inputs
+
+                target = handoff_dir / iteration_dir.name
+                exported = export_fitting_inputs(iteration_dir, target, config_file, output, iteration)
+                print(
+                    f"SevenNet labels are ready; exported the minimal FC2 handoff to {exported}.\n"
+                    "Commit/push it, fit with tdep_handoff.py on the local machine, then import its FC2 "
+                    "on Colab before resuming this command.",
+                    flush=True,
+                )
+                return
             fit_force_constants(config, iteration_dir)
         else:
             shutil.copy2(forceconstant, iteration_dir / "infile.forceconstant")
@@ -778,10 +802,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="tdep_tetragonal.yaml", type=Path)
     parser.add_argument("--dry-run", action="store_true", help="Validate paths and settings without TDEP or SevenNet calculations.")
+    parser.add_argument(
+        "--stop-after-labeling", action="store_true",
+        help="After one reviewed iteration, export native FC2 inputs for a local extract_forceconstants handoff.",
+    )
+    parser.add_argument(
+        "--handoff-dir", type=Path,
+        help="Git-tracked handoff root; writes <handoff-dir>/iteration_XX/.",
+    )
     args = parser.parse_args()
     config_file = args.config.resolve()
     try:
-        run(load_config(config_file), config_file, args.dry_run)
+        run(
+            load_config(config_file), config_file, args.dry_run,
+            stop_after_labeling=args.stop_after_labeling,
+            handoff_dir=args.handoff_dir.resolve() if args.handoff_dir is not None else None,
+        )
     except Exception as error:
         print(f"ERROR: {error}", file=sys.stderr)
         raise
