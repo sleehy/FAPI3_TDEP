@@ -1,0 +1,35 @@
+{
+  "config_sha256": "8022c909a62c12a47ca67b74511a29177c36149246146f730cb8210cd7a6d069",
+  "created_utc": "2026-09-09T04:09:28.786932+00:00",
+  "format": "tdep-forceconstant-handoff-v1",
+  "inputs": {
+    "infile.forces": {
+      "bytes": 30460806,
+      "sha256": "65beba19c3b72deb5e43c500d7f9e196b852b51ea618551cee8ed4e1f49517bd"
+    },
+    "infile.meta": {
+      "bytes": 26,
+      "sha256": "bb5ac07a49bc4d29260f933a6f924d000dfae275fdacffb132d53d91be14b317"
+    },
+    "infile.positions": {
+      "bytes": 29808000,
+      "sha256": "42d4ca32bd58565adfdce015150724cff3b1d972250c406b2034781c1210c7b0"
+    },
+    "infile.ssposcar": {
+      "bytes": 35711,
+      "sha256": "e8f92d0ef7dfa43e0cdf83a86e2faef572652148aff9ccfff4f84716485ea95a"
+    },
+    "infile.stat": {
+      "bytes": 281893,
+      "sha256": "6ceec7449ceda0c9527d825113e28ccfc504635c73d55f6711a0ad000ef46570"
+    },
+    "infile.ucposcar": {
+      "bytes": 1752,
+      "sha256": "8cb226d05843435c694f18b548529d2d4b26f20b22ed9bb89dc4153998db955a"
+    }
+  },
+  "iteration": 1,
+  "kind": "fc2",
+  "source_output_directory": "/content/FAPI3_TDEP/tdep_tetragonal_200K_rc2_6A_it16",
+  "state": "ready_for_local_fit"
+}
