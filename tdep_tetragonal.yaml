@@ -22,7 +22,7 @@ tdep:
 
 sampling:
   quantum: true                # canonical Bose-Einstein/zero-point sampling
-  configurations_per_iteration: 1000
+  configurations_per_iteration: 500
 
 screening:
   # Flag suspicious snapshots before the interactive n/r/q/c review. Pb-I bonds
@@ -55,4 +55,4 @@ free_energy:
 
 output:
   # Use a new directory whenever temperature, supercell, cutoff, or checkpoint changes.
-  directory: tdep_tetragonal_200K_rc2_6A_it16
+  directory: tdep_tetragonal_200K_rc2_6A_500conf
