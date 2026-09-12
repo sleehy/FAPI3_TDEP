@@ -3,3 +3,6 @@ h5py
 matplotlib
 PyYAML
 sevenn
+phono3py
+# Official phono3py v4 Wigner transport-equation plugin (``--tt wte``).
+phono3py-wte @ git+https://github.com/MSimoncelli/phono3py-wte.git@6463b233a350a842c5238a2efeade80428c99ecf

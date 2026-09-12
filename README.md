@@ -291,3 +291,36 @@ files are not overwritten. Re-running with a different q grid reuses the IFC3
 fit and only repeats the thermal-conductivity calculation. Both the IFC3
 cutoff and q mesh require convergence testing; the values above are only a
 small, practical starting calculation.
+
+### phono3py Wigner transport using the same IFCs
+
+The TDEP IFC fitting can be run once without calculating TDEP conductivity:
+
+```bash
+python scripts/fit_ifc3_kappa_iterations.py \
+  --input-root ifc3_iter12_16_200conf \
+  --thirdorder-cutoff 4.0 \
+  --fit-only
+```
+
+Then calculate phono3py's official Wigner transport equation (WTE) solver
+with those exact fitted IFC2/IFC3 pairs:
+
+```bash
+python scripts/fit_kappa_with_wigner_iterations.py \
+  --input-root ifc3_iter12_16_200conf \
+  --thirdorder-cutoff 4.0 \
+  --qpoint-grid 6 6 6 \
+  --solver rta \
+  --sigma 0.1
+```
+
+`fit_kappa_with_wigner_iterations.py` never refits IFCs. It first converts
+each shared TDEP pair once to compact phono3py `fc2.hdf5`/`fc3.hdf5` under
+`ifc3_rc3_<cutoff>A/phono3py_ifcs/`, then writes WTE output in a separate
+`phono3py_wte_<solver>_qg_.../` directory. Thus a q-grid or WTE-solver study
+reuses both the TDEP fitting result and the converted HDF5 IFCs. The solver is
+the separate official `phono3py-wte` plugin (`--tt wte` in phono3py v4), which
+is listed in `requirements.txt`; `--solver lbte` has substantially higher
+memory demand than the default Wigner RTA. Converge both q mesh and `--sigma`;
+the 0.1 THz value is a starting point, not a material parameter.

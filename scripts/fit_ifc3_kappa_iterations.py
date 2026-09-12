@@ -38,7 +38,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--iterations", type=int, nargs="+", default=[12, 13, 14, 15, 16])
     parser.add_argument("--thirdorder-cutoff", required=True, type=float, metavar="ANGSTROM")
     parser.add_argument(
-        "--qpoint-grid", required=True, type=int, nargs=3, metavar=("N1", "N2", "N3"),
+        "--qpoint-grid", type=int, nargs=3, metavar=("N1", "N2", "N3"),
         help="Common BZ q mesh for every iteration (converge this independently).",
     )
     parser.add_argument(
@@ -47,6 +47,10 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--integrationtype", type=int, choices=(1, 2, 3), default=2)
     parser.add_argument("--mpi-ranks", type=int, default=1, help="Use mpirun -np N when N > 1.")
+    parser.add_argument(
+        "--fit-only", action="store_true",
+        help="Only create/reuse the shared TDEP IFC2+IFC3 pair; do not calculate TDEP kappa.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -85,8 +89,10 @@ def run(command: list[str], cwd: Path, dry_run: bool) -> None:
 
 def main() -> None:
     args = parse_arguments()
-    if args.thirdorder_cutoff <= 0 or args.mpi_ranks < 1 or any(point < 1 for point in args.qpoint_grid):
-        raise ValueError("Cutoff, MPI ranks, and all q-point-grid dimensions must be positive.")
+    if args.thirdorder_cutoff <= 0 or args.mpi_ranks < 1:
+        raise ValueError("Cutoff and MPI ranks must be positive.")
+    if not args.fit_only and (args.qpoint_grid is None or any(point < 1 for point in args.qpoint_grid)):
+        raise ValueError("--qpoint-grid must contain three positive integers unless --fit-only is used.")
 
     input_root = args.input_root.resolve()
     source_config_file = input_root / "config_used.yaml"
@@ -116,9 +122,7 @@ def main() -> None:
                 f"iteration {number}: requested cutoff exceeds its safe maximum "
                 f"({safe_cutoff:.3f} A)."
             )
-
         fit_dir = iteration / f"ifc3_rc3_{args.thirdorder_cutoff:g}A"
-        kappa_dir = fit_dir / ("kappa_qg_" + "x".join(map(str, args.qpoint_grid)))
         if not args.dry_run:
             fit_dir.mkdir(exist_ok=True)
             for filename in FIT_INPUTS:
@@ -138,6 +142,11 @@ def main() -> None:
         if not args.dry_run and not (fc2.is_file() and fc3.is_file()):
             raise RuntimeError(f"iteration {number}: extract_forceconstants did not write both FC2 and IFC3.")
 
+        if args.fit_only:
+            continue
+
+        assert args.qpoint_grid is not None
+        kappa_dir = fit_dir / ("kappa_qg_" + "x".join(map(str, args.qpoint_grid)))
         output = kappa_dir / "outfile.thermal_conductivity"
         if output.is_file():
             print(f"  reuse {output}")
