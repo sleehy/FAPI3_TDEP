@@ -1,0 +1,67 @@
+input:
+  structure: tetragonal/CONTCAR_tet
+calculation:
+  checkpoint: checkpoint_fine_tuned_al_round3.pth
+  device: auto
+tdep:
+  bin_dir: external/tdep/bin
+  temperature_K: 200.0
+  supercell_matrix:
+  - 3
+  - 3
+  - 2
+  iterations: 16
+  initial_maximum_frequency_THz: 100.0
+  secondorder_cutoff_A: 6.0
+sampling:
+  quantum: true
+  configurations_per_iteration: 500
+screening:
+  pb_i_reference_cutoff_A: 4.0
+  pb_i_min_distance_A: 2.5
+  pb_i_max_bond_distance_A: 3.8
+dispersion:
+  points_per_segment: 81
+  overlay_start_iteration: 1
+  overlay_interval: 3
+  qpoints:
+  - - 0.0
+    - 0.0
+    - 0.0
+  - - 0.5
+    - 0.0
+    - 0.0
+  - - 0.5
+    - 0.5
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 0.5
+  - - 0.5
+    - 0.0
+    - 0.5
+  - - 0.5
+    - 0.5
+    - 0.5
+  - - 0.0
+    - 0.0
+    - 0.5
+  labels:
+  - Γ
+  - X
+  - M
+  - Γ
+  - Z
+  - R
+  - A
+  - Z
+free_energy:
+  qpoint_grid:
+  - 24
+  - 24
+  - 24
+output:
+  directory: tdep_tetragonal_200K_rc2_6A_500conf
