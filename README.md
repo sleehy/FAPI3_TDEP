@@ -266,3 +266,28 @@ Before fitting, the script verifies that the newly reviewed numbered
 Pb–I screening and MLP-energy review CSVs cover every configuration. A
 previously flagged Pb–I geometry remains a warning, matching `run_tdep.py`'s
 manual-review policy.
+
+## IFC3 and thermal conductivity across saved iterations
+
+When native, labelled TDEP datasets already exist for several iterations (for
+example `ifc3_iter12_16/iteration_12` through `iteration_16`), fit each one
+and evaluate all of them on exactly the same q mesh with:
+
+```bash
+python scripts/fit_ifc3_kappa_iterations.py \
+  --input-root ifc3_iter12_16 \
+  --thirdorder-cutoff 4.0 \
+  --qpoint-grid 8 8 8 \
+  --mpi-ranks 8
+```
+
+First add `--dry-run` to inspect the five commands. The script reuses the data
+checks, temperature parsing, and supercell-cutoff guard from
+`fit_tdep_ifc3.py`, then uses official TDEP `extract_forceconstants` and
+`thermal_conductivity_2023`. It writes a joint fitted FC2/IFC3 pair to each
+`iteration_NN/ifc3_rc3_<cutoff>A/`, and the native thermal result to its
+`kappa_qg_<N1>x<N2>x<N3>/outfile.thermal_conductivity`; original iteration
+files are not overwritten. Re-running with a different q grid reuses the IFC3
+fit and only repeats the thermal-conductivity calculation. Both the IFC3
+cutoff and q mesh require convergence testing; the values above are only a
+small, practical starting calculation.

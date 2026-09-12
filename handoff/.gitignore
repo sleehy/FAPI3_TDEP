@@ -12,3 +12,15 @@
 !*/infile.forces
 !*/outfile.forceconstant
 !*/outfile.forceconstant_thirdorder
+
+# A grouped handoff can retain several independent iteration directories.
+!*/*/
+!*/*/manifest.json
+!*/*/infile.ucposcar
+!*/*/infile.ssposcar
+!*/*/infile.meta
+!*/*/infile.stat
+!*/*/infile.positions
+!*/*/infile.forces
+!*/*/outfile.forceconstant
+!*/*/outfile.forceconstant_thirdorder
