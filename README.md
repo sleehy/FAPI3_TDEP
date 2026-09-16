@@ -10,6 +10,7 @@ Configuration-driven stochastic TDEP phonon renormalization for tetragonal FAPbI
 - `external/tdep`: pinned [official TDEP](https://github.com/tdep-developers/tdep) Git submodule.
 - `tdep_tetragonal.yaml`: all run parameters.
 - `scripts/run_tdep.py`: self-consistent TDEP workflow.
+- `scripts/run_tdep_auto.py`: non-interactive, geometry-aware TDEP workflow.
 
 ## Default calculation
 
@@ -60,6 +61,32 @@ Set `tdep.temperature_K` in `tdep_tetragonal.yaml` before production if a temper
 At every incomplete iteration, the script automatically screens every generated `contcar_conf*` for abnormal Pb–I geometry before the interactive review. It reports the one-based numbers of snapshots with a Pb–I contact shorter than `screening.pb_i_min_distance_A` or a reference Pb–I bond longer than `screening.pb_i_max_bond_distance_A`, and writes all measurements to `pb_i_distance_screening.csv`. The Pb–I reference bonds are identified once from that iteration's `infile.ssposcar`; close contacts are nevertheless checked against all Pb/I pairs so a new collapsed contact is detected. The default limits (2.5–3.8 Å) are configurable in `tdep_tetragonal.yaml` and are warnings only: inspect the listed snapshots, then use `n`, `r`, `c`, or `q` as appropriate. The script also labels all snapshots with SevenNet, saves `mlp_energy_histogram.png` and a descending-energy `mlp_energies.csv`, and waits for input. Inspect any high-energy snapshot named in the CSV with VESTA. For a molecular-geometry check, enter `d` followed by one or more one-based configuration numbers (for example, `d 17` or `d 17 42`). This writes `<contcar_conf*>_bond_distance_histogram.png` and CSV files containing the N–H and C–H bond lengths, then immediately returns to the same prompt without relabelling configurations. The pairs are identified once from that iteration's `infile.ssposcar` using element-specific covalent-radius cutoffs, then the same atom-index pairs are measured in the selected snapshot under periodic minimum-image distances. Thus thermal displacements cannot cause a neighbouring H atom to be mistaken for a new bond.
 
 If a snapshot is unphysical, enter `n` followed by its one-based configuration number, for example `n 17` or `n 17 42`. The script draws fresh snapshot(s) from the same TDEP ensemble, replaces only the selected files, keeps the displaced originals in `resampled_snapshots/`, then reruns SevenNet only for those replacement snapshots and recreates the review outputs. You can repeat this as needed. To supply a structure manually, overwrite the same `contcar_conf*` file while preserving its supercell lattice, atom count, species, and atom ordering, then enter `r`; because arbitrary files may have changed, `r` recalculates every MLP label. Enter `c` only when the full set is acceptable; it then fits FC2 and advances to the next iteration. Enter `q` (or Ctrl-C) to stop safely before FC2 fitting.
+
+### Fully automatic screening
+
+To run without the manual review prompt, use:
+
+```bash
+python scripts/run_tdep_auto.py --config tdep_tetragonal.yaml --dry-run
+python scripts/run_tdep_auto.py --config tdep_tetragonal.yaml
+```
+
+The automatic workflow screens only high-energy SevenNet outliers for H
+geometry: an upper-tail modified-z score above 3.5, computed robustly from the
+per-atom MLP energies using the median absolute deviation. For those outliers,
+fixed N–H/C–H pairs must remain within 0.8–1.3 times the corresponding length
+in `infile.ssposcar` (the supercell made from the relaxed input CONTCAR), and
+the closest H–Pb and H–I distances must be at least 2.2 Å and 1.8 Å,
+respectively. A geometry failure is automatically replaced and relabelled;
+an energy outlier that passes these checks is retained.
+
+All automatic checks are deliberately skipped for iterations 1 and 2: no
+energy-outlier decision, H-distance test, or Pb–I screen is performed. Starting
+at iteration 3, every Pb–I failure is replaced regardless of MLP energy. Each
+screening round writes `automatic_screening_round_*.csv`, and rejected
+snapshots are archived under `resampled_snapshots/`. The defaults are exposed
+as command-line options, including `--outlier-mad-z`, `--minimum-h-pb`,
+`--minimum-h-i`, `--screening-start-iteration`, and `--max-resample-rounds`.
 
 The distance diagnostic is also available independently after a run or for any compatible POSCAR pair:
 
@@ -142,9 +169,9 @@ local `fit` command to print the TDEP command without allocating memory.
 
 ## Split IFC3 fitting after FC2 convergence
 
-Use the same split after selecting a converged final FC2. `fit_tdep_ifc3.py`
-generates and reviews its **new** IFC3 configurations on Colab, then exits
-before the memory-intensive joint IFC2/IFC3 fit:
+Use the same split after selecting a converged final FC2. The internal
+sampling helper generates and reviews its **new** IFC3 configurations on Colab,
+then exits before the memory-intensive joint IFC2/IFC3 fit:
 
 ```bash
 python scripts/fit_tdep_ifc3.py \
@@ -186,8 +213,9 @@ python scripts/tdep_handoff.py import-ifc3 \
   --output-dir tdep_tetragonal_200K_rc2_6A/iteration_16/ifc3_rc3_4A_nconf_300
 ```
 
-The normal one-machine `fit_tdep_ifc3.py` invocation remains available when
-GPU and memory are both local.
+For the normal one-machine workflow, use only
+`fit_kappa_with_wigner_iterations.py`; its `--new-configurations` argument
+performs this same sampling, fitting, and κ calculation in one command.
 
 ## Plot a TDEP band structure and PDOS
 
@@ -227,17 +255,18 @@ CSV reports the physical slope in THz Å, velocity in m/s, fit standard error,
 and R². Change `--fit-points` to check the fitting-window sensitivity, or limit
 the calculation to particular directions with `--directions GM-X GM-Z`.
 
-## IFC3 fitting
+## IFC3 fitting from newly sampled configurations
 
 Fit finite-temperature IFC3 from the force/position data of a completed TDEP
 iteration with the official TDEP `extract_forceconstants` program:
 
 ```bash
-python scripts/fit_tdep_ifc3.py \
-  --result-dir tdep_tetragonal_200K_rc2_6A/iteration_16 \
-  --config tdep_tetragonal.yaml \
+python scripts/fit_kappa_with_wigner_iterations.py \
+  --input-root tdep_tetragonal_200K_rc2_6A \
+  --iterations 16 \
   --thirdorder-cutoff 4.0 \
-  --configurations 300 \
+  --new-configurations 300 \
+  --qpoint-grid 6 6 6 \
   --dry-run
 ```
 
@@ -247,8 +276,9 @@ sampling Hamiltonian for TDEP's official `canonical_configuration`, rather
 than reusing that iteration's old snapshots. The new snapshots are labelled
 with SevenNet and pass through the same interactive Pb–I/energy review and
 resampling process as `run_tdep.py`, before native TDEP fitting files are
-written. TDEP then writes `outfile.forceconstant_thirdorder` to the separate
-working directory `ifc3_rc3_4A_nconf_300/`; the original iteration is never
+written. The shared IFC fitting code writes the joint IFC2/IFC3 pair to the
+separate working directory `ifc3_rc3_4A_nconf_300/`, converts it for phono3py,
+and calculates Wigner κ on `--qpoint-grid`; the original iteration is never
 modified. Internally, TDEP first fits IFC2, subtracts the IFC2 force from the
 labelled forces, then fits IFC3 to that residual. The script obtains the IFC2
 cutoff and temperature from the final iteration. In particular, it uses
@@ -267,44 +297,11 @@ Pb–I screening and MLP-energy review CSVs cover every configuration. A
 previously flagged Pb–I geometry remains a warning, matching `run_tdep.py`'s
 manual-review policy.
 
-## IFC3 and thermal conductivity across saved iterations
+## IFC3 fitting and Wigner thermal conductivity across saved iterations
 
 When native, labelled TDEP datasets already exist for several iterations (for
-example `ifc3_iter12_16/iteration_12` through `iteration_16`), fit each one
-and evaluate all of them on exactly the same q mesh with:
-
-```bash
-python scripts/fit_ifc3_kappa_iterations.py \
-  --input-root ifc3_iter12_16 \
-  --thirdorder-cutoff 4.0 \
-  --qpoint-grid 8 8 8 \
-  --mpi-ranks 8
-```
-
-First add `--dry-run` to inspect the five commands. The script reuses the data
-checks, temperature parsing, and supercell-cutoff guard from
-`fit_tdep_ifc3.py`, then uses official TDEP `extract_forceconstants` and
-`thermal_conductivity_2023`. It writes a joint fitted FC2/IFC3 pair to each
-`iteration_NN/ifc3_rc3_<cutoff>A/`, and the native thermal result to its
-`kappa_qg_<N1>x<N2>x<N3>/outfile.thermal_conductivity`; original iteration
-files are not overwritten. Re-running with a different q grid reuses the IFC3
-fit and only repeats the thermal-conductivity calculation. Both the IFC3
-cutoff and q mesh require convergence testing; the values above are only a
-small, practical starting calculation.
-
-### phono3py Wigner transport using the same IFCs
-
-The TDEP IFC fitting can be run once without calculating TDEP conductivity:
-
-```bash
-python scripts/fit_ifc3_kappa_iterations.py \
-  --input-root ifc3_iter12_16_200conf \
-  --thirdorder-cutoff 4.0 \
-  --fit-only
-```
-
-Then calculate phono3py's official Wigner transport equation (WTE) solver
-with those exact fitted IFC2/IFC3 pairs:
+example `ifc3_iter12_16/iteration_12` through `iteration_16`), use the single
+IFC3/Wigner entry point:
 
 ```bash
 python scripts/fit_kappa_with_wigner_iterations.py \
@@ -315,12 +312,36 @@ python scripts/fit_kappa_with_wigner_iterations.py \
   --sigma 0.1
 ```
 
-`fit_kappa_with_wigner_iterations.py` never refits IFCs. It first converts
-each shared TDEP pair once to compact phono3py `fc2.hdf5`/`fc3.hdf5` under
-`ifc3_rc3_<cutoff>A/phono3py_ifcs/`, then writes WTE output in a separate
-`phono3py_wte_<solver>_qg_.../` directory. Thus a q-grid or WTE-solver study
-reuses both the TDEP fitting result and the converted HDF5 IFCs. The solver is
-the separate official `phono3py-wte` plugin (`--tt wte` in phono3py v4), which
-is listed in `requirements.txt`; `--solver lbte` has substantially higher
-memory demand than the default Wigner RTA. Converge both q mesh and `--sigma`;
-the 0.1 THz value is a starting point, not a material parameter.
+First add `--dry-run` to validate each iteration and inspect the TDEP fit
+commands. The script obtains the IFC2 cutoff, supercell matrix, and TDEP
+executable location from `<input-root>/config_used.yaml`; all user-facing
+arguments are defined by this one command. For every selected iteration it
+fits (or safely reuses) the joint IFC2/IFC3 pair in
+`ifc3_rc3_<cutoff>A/`, converts it once to compact phono3py
+`fc2.hdf5`/`fc3.hdf5` under `phono3py_ifcs/`, and writes WTE output in a
+separate `phono3py_wte_<solver>_qg_.../` directory. Re-running with a new q
+grid, solver, or sigma reuses both fitted and converted IFCs.
+
+The solver is the separate official `phono3py-wte` plugin (`--tt wte` in
+phono3py v4), which is listed in `requirements.txt`; `--solver lbte` has
+substantially higher memory demand than the default Wigner RTA. Converge the
+IFC3 cutoff, q mesh, and `--sigma`; 0.1 THz is only a starting value.
+
+By default (or explicitly with `--reuse-configurations`), the native labelled
+dataset already saved in each iteration is fitted. To instead sample a fresh
+IFC3 ensemble from that iteration's final IFC2, supply its size with
+`--new-configurations`; the same command then reviews, fits, converts, and
+calculates κ for the new data:
+
+```bash
+python scripts/fit_kappa_with_wigner_iterations.py \
+  --input-root tdep_tetragonal_200K_rc2_6A_500conf \
+  --iterations 16 \
+  --new-configurations 300 \
+  --thirdorder-cutoff 4.0 \
+  --qpoint-grid 6 6 6
+```
+
+`--sampling-config` selects the `run_tdep.py` YAML for this new-sampling mode
+(default: `tdep_tetragonal.yaml`); it must describe the same temperature and
+supercell as the selected final iteration.

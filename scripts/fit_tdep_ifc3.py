@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -252,6 +251,18 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--stride", type=int, default=1, help="Use every Nth reviewed configuration in the TDEP fit (default: 1).")
     parser.add_argument(
+        "--qpoint-grid", type=int, nargs=3, metavar=("N1", "N2", "N3"),
+        help="WTE q mesh; required unless --stop-after-labeling is used.",
+    )
+    parser.add_argument(
+        "--supercell-matrix", type=int, nargs=3, metavar=("N1", "N2", "N3"),
+        help="Override the diagonal matrix in the sampling YAML for phono3py conversion.",
+    )
+    parser.add_argument("--solver", choices=("rta", "lbte"), default="rta")
+    parser.add_argument("--sigma", type=float, default=0.1, metavar="THZ")
+    parser.add_argument("--no-isotope", action="store_true", help="Disable natural-isotope scattering.")
+    parser.add_argument("--overwrite-conversion", action="store_true")
+    parser.add_argument(
         "--output-dir",
         type=Path,
         help="IFC3 sampling/fitting directory (default: <result-dir>/ifc3_rc3_<cutoff>A_nconf_<count>).",
@@ -270,8 +281,12 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_arguments()
+def run_new_configuration_workflow(args: argparse.Namespace) -> None:
+    """Generate a reviewed IFC3 dataset, fit it, and calculate WTE kappa.
+
+    ``fit_kappa_with_wigner_iterations.py`` is the public entry point for this
+    workflow. This function remains importable for the optional handoff path.
+    """
     if args.thirdorder_cutoff <= 0.0:
         raise ValueError("--thirdorder-cutoff must be positive.")
     if args.secondorder_cutoff is not None and args.secondorder_cutoff <= 0.0:
@@ -280,6 +295,10 @@ def main() -> None:
         raise ValueError("--configurations must be a positive integer.")
     if args.stride < 1:
         raise ValueError("--stride must be a positive integer.")
+    if not args.stop_after_labeling and (args.qpoint_grid is None or any(point < 1 for point in args.qpoint_grid)):
+        raise ValueError("--qpoint-grid must contain three positive integers unless --stop-after-labeling is used.")
+    if args.sigma <= 0.0:
+        raise ValueError("--sigma must be positive.")
     if args.stop_after_labeling and args.handoff_dir is None:
         raise ValueError("--stop-after-labeling requires --handoff-dir.")
     if args.handoff_dir is not None and not args.stop_after_labeling:
@@ -323,26 +342,49 @@ def main() -> None:
         raise ValueError("--output-dir must differ from --result-dir so the final iteration is never overwritten.")
     extract_executable = tdep_executable(sampling_config, "extract_forceconstants")
     sampling_command = canonical_configuration_command(sampling_config, n_configurations, has_prior_fc=True)
-    fit_command = [
-        extract_executable,
-        "--secondorder_cutoff", f"{secondorder_cutoff:.12g}",
-        "--thirdorder_cutoff", f"{args.thirdorder_cutoff:.12g}",
-        "--temperature", f"{temperature:.12g}",
-        "--stride", str(args.stride),
-    ]
     print(f"Final IFC2 sampling Hamiltonian: {final_ifc2}")
     print(f"New IFC3 configurations: {n_configurations} at {temperature:g} K")
     print(f"IFC2 cutoff: {secondorder_cutoff:g} Å ({cutoff_source}); IFC3 cutoff: {args.thirdorder_cutoff:g} Å")
     print(f"Supercell-safe cutoff: {safe_cutoff:.3f} Å")
     print("+", " ".join(sampling_command))
-    print("+", " ".join(fit_command))
+    print(
+        "+", " ".join([
+            extract_executable,
+            "--secondorder_cutoff", f"{secondorder_cutoff:.12g}",
+            "--thirdorder_cutoff", f"{args.thirdorder_cutoff:.12g}",
+            "--temperature", f"{temperature:.12g}",
+            "--stride", str(args.stride),
+        ])
+    )
     if args.dry_run:
         return
 
-    thirdorder_output = output_dir / "outfile.forceconstant_thirdorder"
-    if thirdorder_output.is_file():
-        print(f"IFC3 already exists; reusing {thirdorder_output}")
+    existing_fc2 = output_dir / "outfile.forceconstant"
+    existing_fc3 = output_dir / "outfile.forceconstant_thirdorder"
+    if existing_fc2.is_file() and existing_fc3.is_file():
+        if args.stop_after_labeling:
+            print(f"IFC3 already exists; reusing {existing_fc3}")
+            return
+        assert args.qpoint_grid is not None
+        dimensions = args.supercell_matrix or sampling_config["tdep"]["supercell_matrix"]
+        if len(dimensions) != 3 or any(int(value) < 1 for value in dimensions):
+            raise ValueError("--supercell-matrix must contain three positive diagonal dimensions.")
+        print(f"reuse shared IFCs in {output_dir}")
+        require_wte_plugin()
+        calculate_wte(
+            iteration=output_dir,
+            fit_dir=output_dir,
+            fc2_file=existing_fc2,
+            fc3_file=existing_fc3,
+            dimensions=tuple(int(value) for value in dimensions),
+            qpoint_grid=args.qpoint_grid,
+            solver=args.solver,
+            sigma=args.sigma,
+            no_isotope=args.no_isotope,
+            overwrite_conversion=args.overwrite_conversion,
+        )
         return
+
     stage_sampling_inputs(source_dir, final_ifc2, output_dir)
     configurations = generate_quantum_configurations(sampling_config, output_dir, has_prior_fc=True)
     calculator = sevennet_calculator(sampling_config)
@@ -383,12 +425,39 @@ def main() -> None:
             flush=True,
         )
         return
-    subprocess.run(fit_command, cwd=output_dir, check=True)
-    if not thirdorder_output.is_file():
-        raise RuntimeError("TDEP completed without writing outfile.forceconstant_thirdorder.")
-    print(f"Wrote {thirdorder_output}")
-    print(f"TDEP also wrote the sequential IFC2 fit: {output_dir / 'outfile.forceconstant'}")
+    assert args.qpoint_grid is not None
+    dimensions = args.supercell_matrix or sampling_config["tdep"]["supercell_matrix"]
+    if len(dimensions) != 3 or any(int(value) < 1 for value in dimensions):
+        raise ValueError("--supercell-matrix must contain three positive diagonal dimensions.")
+    # Keep this import local: the public Wigner command imports this sampling
+    # function when --new-configurations is selected.
+    from fit_kappa_with_wigner_iterations import calculate_wte, fit_force_constants, require_wte_plugin
+
+    require_wte_plugin()
+    fc2, fc3 = fit_force_constants(
+        iteration=output_dir,
+        fit_dir=output_dir,
+        rc2=secondorder_cutoff,
+        rc3=args.thirdorder_cutoff,
+        temperature=temperature,
+        stride=args.stride,
+        executable=extract_executable,
+        dry_run=False,
+    )
+    print(f"phono3py WTE: {args.solver.upper()}, q grid {args.qpoint_grid}, sigma {args.sigma:g} THz")
+    calculate_wte(
+        iteration=output_dir,
+        fit_dir=output_dir,
+        fc2_file=fc2,
+        fc3_file=fc3,
+        dimensions=tuple(int(value) for value in dimensions),
+        qpoint_grid=args.qpoint_grid,
+        solver=args.solver,
+        sigma=args.sigma,
+        no_isotope=args.no_isotope,
+        overwrite_conversion=args.overwrite_conversion,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    run_new_configuration_workflow(parse_arguments())
