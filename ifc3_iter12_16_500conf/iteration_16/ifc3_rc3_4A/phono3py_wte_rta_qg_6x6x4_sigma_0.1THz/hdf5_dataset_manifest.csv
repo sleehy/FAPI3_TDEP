@@ -1,0 +1,20 @@
+dataset,shape,dtype
+frequency,"(30, 72)",float64
+gamma,"(1, 30, 72)",float64
+grid_point,"(30,)",int64
+group_velocity,"(30, 72, 3)",float64
+heat_capacity,"(1, 30, 72)",float64
+kappa,"(1, 6)",float64
+kappa_C,"(1, 6)",float64
+kappa_P_RTA,"(1, 6)",float64
+kappa_TOT_RTA,"(1, 6)",float64
+kappa_unit_conversion,(),float64
+mesh,"(3,)",int64
+mode_kappa,"(1, 30, 72, 6)",float64
+mode_kappa_C,"(1, 30, 72, 72, 6)",float64
+mode_kappa_P_RTA,"(1, 30, 72, 6)",float64
+qpoint,"(30, 3)",float64
+sigma,(),float64
+temperature,"(1,)",float64
+version,(),|S5
+weight,"(30,)",int64
