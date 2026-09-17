@@ -1,3 +1,7 @@
 *.hdf5 filter=lfs diff=lfs merge=lfs -text
 outfile.forceconstant filter=lfs diff=lfs merge=lfs -text
 outfile.forceconstant_thirdorder filter=lfs diff=lfs merge=lfs -text
+infile.forceconstant filter=lfs diff=lfs merge=lfs -text
+infile.positions filter=lfs diff=lfs merge=lfs -text
+infile.forces filter=lfs diff=lfs merge=lfs -text
+dispersion_relations_THz.npy filter=lfs diff=lfs merge=lfs -text
