@@ -58,7 +58,18 @@ def default_iterations(available: dict[int, Path], config: dict) -> list[int]:
 
 def load_bands(iteration_dir: Path) -> np.ndarray:
     filename = iteration_dir / "dispersion_relations_THz.npy"
-    bands = np.load(filename) if filename.is_file() else np.loadtxt(iteration_dir / "outfile.dispersion_relations")
+    text_filename = iteration_dir / "outfile.dispersion_relations"
+    if filename.is_file():
+        try:
+            # Keep pickle loading disabled.  A Git LFS pointer can occupy an
+            # unhydrated .npy path, in which case the text output is usable.
+            bands = np.load(filename, allow_pickle=False)
+        except (OSError, ValueError) as exc:
+            if not text_filename.is_file():
+                raise ValueError(f"Could not load saved dispersion data from {filename}.") from exc
+            bands = np.loadtxt(text_filename)
+    else:
+        bands = np.loadtxt(text_filename)
     bands = np.atleast_2d(bands)
     if bands.shape[1] < 2:
         raise ValueError(f"Unexpected dispersion data in {iteration_dir}.")
