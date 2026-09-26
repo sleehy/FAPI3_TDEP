@@ -1,0 +1,4 @@
+# Unit:      eV/atom
+# no. atoms: 648
+#            mean(Epot)                     mean(Epot - Epolar - E2)       mean(Epot - Epolar - E2 - E3)  mean(Epot - Epolar - E2 - E3 - E4)
+            -0.463879352862E+01            -0.473081797700E+01            -0.473078242043E+01            -0.473078242043E+01
